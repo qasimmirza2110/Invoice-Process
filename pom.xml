@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<parent>
+		<groupId>org.springframework.boot</groupId>
+		<artifactId>spring-boot-starter-parent</artifactId>
+		<version>2.7.18</version>
+		<relativePath/> <!-- lookup parent from repository -->
+	</parent>
+	<groupId>com.actify</groupId>
+	<artifactId>task-8-invoice-llm-extraction</artifactId>
+	<version>0.0.1-SNAPSHOT</version>
+	<name>Invoice Process</name>
+	<description>Invoice PDF -> Gemini -> JSON -> Java validation -> PostgreSQL</description>
+
+	<properties>
+		<java.version>1.8</java.version>
+		<!-- Only JDK 17 is installed on this machine. "release 8" makes javac reject
+		     anything that is not valid Java 8 (language features AND JDK APIs). -->
+		<maven.compiler.release>8</maven.compiler.release>
+		<pgtest.excludedGroups>pgtest</pgtest.excludedGroups>
+		<!-- Spring Security 5.7.x (managed by Boot 2.7.18) pulls in nimbus-jose-jwt 9.22, which is affected by
+		     CVE-2025-53864 (deeply nested JSON claims -> denial of service) and CVE-2023-52428.
+		     9.37.4 is the patched release of the same 9.x line (Apache-2.0, Java 7+ bytecode).
+		     Compatibility is proven by JwtCompatibilitySpikeTest. -->
+		<nimbus-jose-jwt.version>9.37.4</nimbus-jose-jwt.version>
+	</properties>
+
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>com.nimbusds</groupId>
+				<artifactId>nimbus-jose-jwt</artifactId>
+				<version>${nimbus-jose-jwt.version}</version>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+
+	<dependencies>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-web</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-jpa</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.postgresql</groupId>
+			<artifactId>postgresql</artifactId>
+			<scope>runtime</scope>
+		</dependency>
+		<!-- Login, password hashing (BCrypt), CSRF and URL/role rules. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+		<!-- Spring Security's JWT support (NimbusJwtEncoder / NimbusJwtDecoder). We are our own token
+		     issuer: tokens are HS256-signed with INVOICE_JWT_SECRET; no external identity provider. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-maven-plugin</artifactId>
+			</plugin>
+			<plugin>
+				<!-- Tests tagged "pgtest" need the separate PostgreSQL test database. They are skipped by
+				     default, so a plain "mvnw test" never needs or touches any database. -->
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<excludedGroups>${pgtest.excludedGroups}</excludedGroups>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+
+	<profiles>
+		<!-- mvnw test -Ppgtest : also runs the PostgreSQL integration tests against
+		     Actify-Internship-Task-8-Invoice-LLM-Extraction_test_db (never the live database;
+		     PgTestDatabaseGuard refuses to start otherwise). -->
+		<profile>
+			<id>pgtest</id>
+			<properties>
+				<pgtest.excludedGroups>no-excluded-tags</pgtest.excludedGroups>
+			</properties>
+		</profile>
+	</profiles>
+
+</project>

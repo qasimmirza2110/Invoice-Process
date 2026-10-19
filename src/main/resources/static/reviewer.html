@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Review queue · Invoice Extraction Workspace</title>
+    <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<header class="site-header">
+    <div class="site-header__inner">
+        <div>
+            <h1>My review queue</h1>
+            <p class="subtitle">Check each invoice against its original PDF, correct the data, then submit one exact version for approval.</p>
+        </div>
+        <div class="user-bar" id="user-bar" hidden>
+            <span class="user-bar__name" id="user-name"></span>
+            <span class="badge badge--neutral" id="user-role"></span>
+            <button type="button" class="btn btn--ghost btn--small" id="logout-btn">Log out</button>
+        </div>
+    </div>
+</header>
+
+<main class="page" id="reviewer-page" hidden>
+    <section class="panel" aria-labelledby="summary-title">
+        <div class="panel__head"><h2 id="summary-title">Today</h2><span class="hint" id="summary-tz"></span></div>
+        <div class="stat-grid" id="summary"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="queue-title">
+        <div class="panel__head">
+            <h2 id="queue-title">Assigned to me</h2>
+            <button type="button" class="btn btn--ghost btn--small" id="refresh-btn">Refresh</button>
+        </div>
+        <div id="queue"></div>
+        <p class="meta" id="queue-empty" hidden>Nothing is assigned to you right now.</p>
+    </section>
+
+    <section class="panel" id="detail" hidden aria-labelledby="detail-title">
+        <div class="panel__head">
+            <h2 id="detail-title">Invoice</h2>
+            <span id="detail-status"></span>
+        </div>
+        <p class="meta" id="detail-meta"></p>
+        <p id="detail-message" hidden></p>
+
+        <div class="review-layout">
+            <div>
+                <h3 class="subhead">Original PDF</h3>
+                <iframe id="pdf-frame" class="pdf-frame" title="Original invoice PDF"></iframe>
+                <p class="meta"><a id="pdf-link" target="_blank" rel="noopener">Open the PDF in a new tab</a></p>
+            </div>
+            <div>
+                <h3 class="subhead">Why it needs attention (extraction)</h3>
+                <ul class="reason-list" id="reasons"></ul>
+                <h3 class="subhead">Automatic checks on the current data</h3>
+                <ul class="reason-list" id="checks"></ul>
+
+                <form id="review-form" class="edit-form" novalidate>
+                    <h3 class="subhead">Invoice data</h3>
+                    <div class="form-grid" id="header-fields"></div>
+                    <h3 class="subhead">Line items</h3>
+                    <div class="table-wrap"><table class="items"><thead><tr>
+                        <th scope="col">Description</th><th scope="col">Qty</th><th scope="col">Unit price</th>
+                        <th scope="col">Tax %</th><th scope="col">Line total</th><th scope="col"></th></tr></thead>
+                        <tbody id="item-rows"></tbody></table></div>
+                    <button type="button" class="btn btn--ghost btn--small" id="add-line-btn">Add line</button>
+                    <h3 class="subhead">Totals</h3>
+                    <div class="form-grid" id="total-fields"></div>
+                    <label for="change-reason">Reason for the correction (optional)</label>
+                    <input type="text" id="change-reason" maxlength="500">
+                    <div class="actions">
+                        <button type="submit" class="btn btn--primary" id="save-btn">Save correction</button>
+                        <button type="button" class="btn btn--secondary" id="submit-btn">Submit this version for approval</button>
+                    </div>
+                </form>
+
+                <h3 class="subhead">Versions</h3>
+                <ol class="history-list" id="versions"></ol>
+            </div>
+        </div>
+    </section>
+</main>
+
+<script src="js/session.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/reviewer.js"></script>
+</body>
+</html>
