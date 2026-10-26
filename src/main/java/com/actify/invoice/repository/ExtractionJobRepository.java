@@ -6,8 +6,13 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 
+/**
+ * The extraction queue: one ExtractionJob row per queued invoice. The native queries below are written for
+ * PostgreSQL (FOR UPDATE ... SKIP LOCKED) and are the only way a worker claims work.
+ */
 public interface ExtractionJobRepository extends JpaRepository<ExtractionJob, Long> {
 
     /**
@@ -21,6 +26,12 @@ public interface ExtractionJobRepository extends JpaRepository<ExtractionJob, Lo
             + "where i.status = 'QUEUED' and j.next_attempt_at <= :now "
             + "order by j.queued_at, j.invoice_id limit 1 for update of j skip locked", nativeQuery = true)
     List<Long> lockNextEligible(@Param("now") LocalDateTime now);
+
+    /** Same as lockNextEligible, but only among the named invoices (invoice.worker.only-invoice-ids). */
+    @Query(value = "select j.invoice_id from extraction_jobs j join invoices i on i.id = j.invoice_id "
+            + "where i.status = 'QUEUED' and j.next_attempt_at <= :now and j.invoice_id in (:ids) "
+            + "order by j.queued_at, j.invoice_id limit 1 for update of j skip locked", nativeQuery = true)
+    List<Long> lockNextEligibleAmong(@Param("now") LocalDateTime now, @Param("ids") Collection<Long> ids);
 
     /** PROCESSING jobs whose worker claimed them before the cutoff (the worker probably died). */
     @Query("select j from ExtractionJob j where j.invoice.status = com.actify.invoice.entity.InvoiceStatus.PROCESSING "

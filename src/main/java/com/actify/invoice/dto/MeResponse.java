@@ -25,5 +25,7 @@ public class MeResponse {
     public Long getId() { return id; }
     public String getEmail() { return email; }
     public String getDisplayName() { return displayName; }
+    /** The name the UI shows: the e-mail before the "@". */
+    public String getName() { return com.actify.invoice.user.UserNames.label(displayName, email); }
     public Role getRole() { return role; }
 }

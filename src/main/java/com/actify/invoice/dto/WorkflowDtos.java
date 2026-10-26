@@ -28,12 +28,18 @@ public final class WorkflowDtos {
         private final Long ownerUserId;
         private final Long batchId;
         private final Long assignedReviewerId;
+        private final String assignedReviewerName;
         private final Integer submittedVersion;
         private final long reviewReasonCount;
         private final LocalDateTime createdAt;
         private final LocalDateTime updatedAt;
 
         public InvoiceSummary(Invoice i, long reviewReasonCount) {
+            this(i, reviewReasonCount, null);
+        }
+
+        /** assignedReviewerName: the reviewer's name for ADMIN / REVIEWER lists; null for vendors and when unassigned. */
+        public InvoiceSummary(Invoice i, long reviewReasonCount, String assignedReviewerName) {
             this.id = i.getId();
             this.status = i.getStatus();
             this.fileName = i.getSourceFileName();
@@ -45,6 +51,7 @@ public final class WorkflowDtos {
             this.ownerUserId = i.getOwnerUserId();
             this.batchId = i.getBatchId();
             this.assignedReviewerId = i.getAssignedReviewerId();
+            this.assignedReviewerName = assignedReviewerName;
             this.submittedVersion = i.getSubmittedVersion();
             this.reviewReasonCount = reviewReasonCount;
             this.createdAt = i.getCreatedAt();
@@ -62,6 +69,7 @@ public final class WorkflowDtos {
         public Long getOwnerUserId() { return ownerUserId; }
         public Long getBatchId() { return batchId; }
         public Long getAssignedReviewerId() { return assignedReviewerId; }
+        public String getAssignedReviewerName() { return assignedReviewerName; }
         public Integer getSubmittedVersion() { return submittedVersion; }
         public long getReviewReasonCount() { return reviewReasonCount; }
         public LocalDateTime getCreatedAt() { return createdAt; }
@@ -92,15 +100,17 @@ public final class WorkflowDtos {
         private final InvoiceStatus fromStatus;
         private final InvoiceStatus toStatus;
         private final Long actorUserId;
+        private final String actorName;
         private final Integer versionNumber;
         private final String reason;
         private final LocalDateTime createdAt;
 
-        public EventResponse(InvoiceWorkflowEvent e) {
+        public EventResponse(InvoiceWorkflowEvent e, String actorName) {
             this.id = e.getId();
             this.fromStatus = e.getFromStatus();
             this.toStatus = e.getToStatus();
             this.actorUserId = e.getActorUserId();
+            this.actorName = actorName;
             this.versionNumber = e.getVersionNumber();
             this.reason = e.getReason();
             this.createdAt = e.getCreatedAt();
@@ -111,6 +121,8 @@ public final class WorkflowDtos {
         public InvoiceStatus getToStatus() { return toStatus; }
         /** null = done by the system (extraction worker). */
         public Long getActorUserId() { return actorUserId; }
+        /** E-mail before the "@" of the actor; null = the system. */
+        public String getActorName() { return actorName; }
         public Integer getVersionNumber() { return versionNumber; }
         public String getReason() { return reason; }
         public LocalDateTime getCreatedAt() { return createdAt; }
@@ -131,6 +143,11 @@ public final class WorkflowDtos {
     public static class AssignmentRequest {
         private List<Long> invoiceIds;
         private Long reviewerId;
+        /** true = deliberately change an existing assignment (or unassign). Default false: assigned invoices are left alone. */
+        private Boolean reassign;
+
+        public Boolean getReassign() { return reassign; }
+        public void setReassign(Boolean reassign) { this.reassign = reassign; }
 
         public List<Long> getInvoiceIds() { return invoiceIds; }
         public void setInvoiceIds(List<Long> invoiceIds) { this.invoiceIds = invoiceIds; }
@@ -143,15 +160,31 @@ public final class WorkflowDtos {
         private final Long invoiceId;
         private final boolean assigned;
         private final String message;
+        private final InvoiceStatus status;
+        private final Long reviewerId;
+        private final String reviewerName;
 
         public AssignmentResult(Long invoiceId, boolean assigned, String message) {
+            this(invoiceId, assigned, message, null, null, null);
+        }
+
+        /** status / reviewerId / reviewerName = the invoice's state AFTER this request (canonical server values). */
+        public AssignmentResult(Long invoiceId, boolean assigned, String message, InvoiceStatus status, Long reviewerId,
+                                String reviewerName) {
             this.invoiceId = invoiceId;
             this.assigned = assigned;
             this.message = message;
+            this.status = status;
+            this.reviewerId = reviewerId;
+            this.reviewerName = reviewerName;
         }
 
         public Long getInvoiceId() { return invoiceId; }
+        /** true = this request changed (or confirmed) the assignment; false = refused, see message. */
         public boolean isAssigned() { return assigned; }
         public String getMessage() { return message; }
+        public InvoiceStatus getStatus() { return status; }
+        public Long getReviewerId() { return reviewerId; }
+        public String getReviewerName() { return reviewerName; }
     }
 }

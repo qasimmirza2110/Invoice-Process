@@ -93,7 +93,7 @@ public class GeminiInvoiceExtractor implements LlmInvoiceExtractor {
             responseBody = restTemplate.postForObject(url, request, String.class);
         } catch (HttpStatusCodeException e) {
             throw new InvoiceExtractionException(describeProviderError(e), InvoiceExtractionException.Kind.HTTP_ERROR, e.getRawStatusCode(),
-                    readProviderCode(e), null, e);
+                    readProviderCode(e), null, readRetryAfterSeconds(e), e);
         } catch (RestClientException e) {
             // Timeouts, DNS problems, connection refused... Details stay in the server log.
             log.warn("Could not reach Gemini: {}", e.getMessage());
@@ -264,6 +264,31 @@ public class GeminiInvoiceExtractor implements LlmInvoiceExtractor {
         } catch (JsonProcessingException | RuntimeException ignored) {
             return null; // body was not JSON - classification then relies on the HTTP status alone
         }
+    }
+
+    /**
+     * How long the provider asked us to wait before the next call: the standard Retry-After header (whole seconds),
+     * otherwise a google.rpc.RetryInfo detail in the error body ("retryDelay": "37s" / "1.5s"), rounded up.
+     * null when neither is present or readable. Bounded to one day so a strange value cannot park a job forever.
+     */
+    Long readRetryAfterSeconds(HttpStatusCodeException e) {
+        Long seconds = null;
+        String header = e.getResponseHeaders() == null ? null : e.getResponseHeaders().getFirst(HttpHeaders.RETRY_AFTER);
+        if (header != null && header.trim().matches("\\d{1,9}")) {
+            seconds = Long.valueOf(header.trim());
+        } else {
+            try {
+                for (JsonNode detail : objectMapper.readTree(e.getResponseBodyAsString()).path("error").path("details")) {
+                    String delay = detail.path("retryDelay").asText("");
+                    if (detail.path("@type").asText("").endsWith("google.rpc.RetryInfo") && delay.matches("\\d{1,9}(\\.\\d+)?s")) {
+                        seconds = (long) Math.ceil(Double.parseDouble(delay.substring(0, delay.length() - 1)));
+                    }
+                }
+            } catch (JsonProcessingException | RuntimeException ignored) {
+                // no usable hint - the worker's own back-off applies
+            }
+        }
+        return seconds == null ? null : Math.min(seconds, 24L * 60 * 60);
     }
 
     private static String readClasspathFile(String path) {

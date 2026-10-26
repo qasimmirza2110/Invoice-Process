@@ -85,6 +85,9 @@ public class AppUser {
     public Long getId() { return id; }
     public String getEmail() { return email; }
     public String getDisplayName() { return displayName; }
+    public void setDisplayName(String displayName) { this.displayName = displayName; }
+    /** Shown in the UI: the e-mail before the "@" (see UserNames). */
+    public String getName() { return UserNames.label(displayName, email); }
     public String getPasswordHash() { return passwordHash; }
     public Role getRole() { return role; }
     public boolean isEnabled() { return enabled; }

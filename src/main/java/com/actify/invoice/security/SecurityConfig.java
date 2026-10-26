@@ -1,5 +1,6 @@
 package com.actify.invoice.security;
 
+import com.actify.invoice.controller.HealthController;
 import com.actify.invoice.user.AppUserRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.context.annotation.Bean;
@@ -14,7 +15,9 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.web.authentication.session.NullAuthenticatedSessionStrategy;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
+import org.springframework.security.web.csrf.CsrfTokenRepository;
 import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 import org.springframework.security.web.util.matcher.OrRequestMatcher;
 import org.springframework.security.web.util.matcher.RequestMatcher;
@@ -29,30 +32,29 @@ import org.springframework.security.web.util.matcher.RequestMatcher;
  *  - 404: (from InvoiceAccessPolicy) the invoice/document exists only for other users - we don't reveal it
  *
  * CSRF: the login cookie is sent by the browser automatically, so every POST/PUT/DELETE must also carry the
- * X-XSRF-TOKEN header, copied by our JavaScript from the readable XSRF-TOKEN cookie. Another website cannot
- * read that cookie, so it cannot forge the header. CSRF is never disabled.
+ * X-XSRF-TOKEN header, copied by the frontend's JavaScript from the readable XSRF-TOKEN cookie. Another website
+ * cannot read that cookie, so it cannot forge the header. CSRF is never disabled.
+ *
+ * This backend is API-only: it serves no HTML pages, scripts or styles. Any URL not listed below - including "/" -
+ * is denied (401 without a login, 403 with one). There is no CORS configuration on purpose: the frontend is
+ * expected on the same origin (see docs/REACT_BACKEND_HANDOFF.md), and cross-origin browser calls stay refused.
  */
 @Configuration
 public class SecurityConfig {
 
-    /** Pages and calls that work without logging in. The login cookie is ignored on these. */
+    /**
+     * Calls that work without logging in. The login cookie is ignored on these, so an expired cookie can never block
+     * logging in again. The health check reveals nothing beyond "the process is up" (HealthController).
+     */
     static final RequestMatcher PUBLIC_REQUESTS = new OrRequestMatcher(
-            new AntPathRequestMatcher("/", "GET"),
-            new AntPathRequestMatcher("/index.html", "GET"),
-            new AntPathRequestMatcher("/login.html", "GET"),
-            // Role pages (vendor/reviewer/admin.html) hold no data: each one loads its data from the protected API
-            // and sends a non-matching role to its own home page. The API decides what anyone may see.
-            new AntPathRequestMatcher("/*.html", "GET"),
-            new AntPathRequestMatcher("/css/**", "GET"),
-            new AntPathRequestMatcher("/js/**", "GET"),
-            new AntPathRequestMatcher("/favicon.ico", "GET"),
             new AntPathRequestMatcher("/api/auth/login", "POST"),
-            new AntPathRequestMatcher("/api/auth/logout", "POST"));
+            new AntPathRequestMatcher("/api/auth/logout", "POST"),
+            new AntPathRequestMatcher(HealthController.PATH, "GET"));
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http, JwtTokenService tokenService,
                                                    AppUserRepository userRepository, AuthCookies authCookies,
-                                                   ObjectMapper objectMapper) throws Exception {
+                                                   ObjectMapper objectMapper, CsrfTokenRepository csrfTokens) throws Exception {
         SecurityErrorWriter errorWriter = new SecurityErrorWriter(objectMapper);
         JwtCookieAuthenticationFilter jwtFilter = new JwtCookieAuthenticationFilter(
                 tokenService, userRepository, authCookies, errorWriter, PUBLIC_REQUESTS);
@@ -60,14 +62,20 @@ public class SecurityConfig {
         http
                 // No server-side session: every request is authenticated from its cookie.
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                // XSRF-TOKEN cookie (readable by our JS) + X-XSRF-TOKEN header on every unsafe request.
-                .csrf(c -> c.csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse()))
+                // XSRF-TOKEN cookie (readable by the frontend's JS) + X-XSRF-TOKEN header on every unsafe request.
+                // NullAuthenticatedSessionStrategy: with a STATELESS session Spring would otherwise treat EVERY
+                // cookie-authenticated request as a fresh login and replace the CSRF token each time, so a POST could
+                // read token N while a parallel response already set N+1 -> intermittent 403. The token is rotated
+                // on purpose at login/logout instead (AuthController).
+                .csrf(c -> c.csrfTokenRepository(csrfTokens)
+                        .sessionAuthenticationStrategy(new NullAuthenticatedSessionStrategy()))
                 // We have our own JSON login endpoint; switch off the HTML/basic login and logout pages.
                 .formLogin(f -> f.disable())
                 .httpBasic(b -> b.disable())
                 .logout(l -> l.disable())
                 .requestCache(r -> r.disable())
-                // The review screen shows the stored PDF in a same-origin frame.
+                // A same-origin frontend may show the stored PDF in a frame (GET /api/invoices/{id}/document);
+                // any other site may not frame our responses.
                 .headers(h -> h.frameOptions().sameOrigin())
                 .exceptionHandling(e -> e.authenticationEntryPoint(errorWriter).accessDeniedHandler(errorWriter))
                 .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
@@ -83,6 +91,8 @@ public class SecurityConfig {
                         // Batch upload: vendors (and admins) only; ownership is checked per batch (404 otherwise).
                         .antMatchers("/api/batches", "/api/batches/**").hasAnyRole("VENDOR", "ADMIN")
                         .antMatchers(HttpMethod.GET, "/api/categories").authenticated()
+                        // Which cloud pickers exist (public browser values only, never a secret or token).
+                        .antMatchers(HttpMethod.GET, "/api/cloud-sources").hasAnyRole("VENDOR", "ADMIN")
 
                         // Legacy single-file extraction: ADMIN only.
                         .antMatchers(HttpMethod.POST, "/api/invoices/extract").hasRole("ADMIN")
@@ -107,6 +117,12 @@ public class SecurityConfig {
     @Bean
     public RequestRejectedHandler requestRejectedHandler() {
         return new HttpStatusRequestRejectedHandler(HttpStatus.BAD_REQUEST.value());
+    }
+
+    /** The one CSRF token store: the security filter checks it, AuthController rotates it at login/logout. */
+    @Bean
+    public CsrfTokenRepository csrfTokenRepository() {
+        return CookieCsrfTokenRepository.withHttpOnlyFalse();
     }
 
     /** BCrypt with the default cost 10 (OWASP minimum). Passwords over 72 bytes are rejected before this. */

@@ -1,7 +1,9 @@
 package com.actify.invoice.security;
 
 import com.actify.invoice.controller.BatchController;
+import com.actify.invoice.cloud.CloudSourceSettings;
 import com.actify.invoice.controller.CategoryController;
+import com.actify.invoice.controller.CloudSourceController;
 import com.actify.invoice.dto.BatchDtos.FileIntakeResponse;
 import com.actify.invoice.intake.BatchIntakeService;
 import com.actify.invoice.intake.CategoryCodes;
@@ -20,6 +22,8 @@ import javax.servlet.http.Cookie;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
@@ -30,8 +34,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /** Batch upload and category routes: who may call them, and the 202/422 contract of a single file upload. */
-@WebMvcTest(controllers = {BatchController.class, CategoryController.class})
-@WithTask8WebSecurity
+@WebMvcTest(controllers = {BatchController.class, CategoryController.class, CloudSourceController.class})
+@WithInvoiceWebSecurity
 class BatchRouteProtectionWebTest {
 
     @Autowired private MockMvc mvc;
@@ -40,6 +44,7 @@ class BatchRouteProtectionWebTest {
     @MockBean private InvoiceRepository invoiceRepository;
     @MockBean private BatchIntakeService intakeService;
     @MockBean private CategoryCodes categoryCodes;
+    @MockBean private CloudSourceSettings cloudSources;
 
     private final MockMultipartFile pdf = new MockMultipartFile("file", "a.pdf", "application/pdf", "%PDF-1.4".getBytes());
 
@@ -59,13 +64,13 @@ class BatchRouteProtectionWebTest {
 
         mvc.perform(multipart("/api/batches/1/files").file(pdf).cookie(vendor)).andExpect(status().isForbidden());
 
-        when(intakeService.addFile(eq(1L), any(), any())).thenReturn(FileIntakeResponse.accepted("a.pdf", 50L));
+        when(intakeService.addFile(eq(1L), any(), any(), any())).thenReturn(FileIntakeResponse.accepted("a.pdf", 50L));
         mvc.perform(multipart("/api/batches/1/files").file(pdf).cookie(vendor).with(csrf()))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.accepted").value(true))
                 .andExpect(jsonPath("$.status").value("QUEUED"));
 
-        when(intakeService.addFile(eq(2L), any(), any()))
+        when(intakeService.addFile(eq(2L), any(), any(), any()))
                 .thenReturn(FileIntakeResponse.rejected("a.pdf", "INVALID_FILE", "File content is not a valid PDF"));
         mvc.perform(multipart("/api/batches/2/files").file(pdf).cookie(vendor).with(csrf()))
                 .andExpect(status().isUnprocessableEntity())
@@ -80,5 +85,27 @@ class BatchRouteProtectionWebTest {
         mvc.perform(get("/api/categories").cookie(vendor)).andExpect(status().isOk());
         mvc.perform(post("/api/admin/categories").cookie(vendor).with(csrf()).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"code\":\"X1\",\"displayName\":\"X\"}")).andExpect(status().isForbidden());
+    }
+
+    @Test
+    void theDeclaredSourceIsPassedToTheIntakeServiceUnchanged() throws Exception {
+        Cookie vendor = TestLogins.cookieFor(TestLogins.user(2, Role.VENDOR), users, tokenService);
+        when(intakeService.addFile(eq(3L), any(), isNull(), eq("GOOGLE_DRIVE")))
+                .thenReturn(FileIntakeResponse.rejected("a.pdf", "SOURCE_MISMATCH", "This batch only takes files from LOCAL"));
+        mvc.perform(multipart("/api/batches/3/files").file(pdf).param("source", "GOOGLE_DRIVE").cookie(vendor).with(csrf()))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.code").value("SOURCE_MISMATCH"));
+        verify(intakeService).addFile(eq(3L), any(), isNull(), eq("GOOGLE_DRIVE"));
+    }
+
+    @Test
+    void cloudSourcesAreForVendorsAndAdminsOnly() throws Exception {
+        Cookie vendor = TestLogins.cookieFor(TestLogins.user(2, Role.VENDOR), users, tokenService);
+        Cookie reviewer = TestLogins.cookieFor(TestLogins.user(3, Role.REVIEWER), users, tokenService);
+        when(cloudSources.describeAll()).thenReturn(java.util.Collections.emptyList());
+
+        mvc.perform(get("/api/cloud-sources")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/cloud-sources").cookie(reviewer)).andExpect(status().isForbidden());
+        mvc.perform(get("/api/cloud-sources").cookie(vendor)).andExpect(status().isOk());
     }
 }

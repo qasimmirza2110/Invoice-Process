@@ -79,10 +79,6 @@ public class GeminiQuotaGuard {
             return new Check(true, null, null, estimatedInputTokens);
         }
 
-        public static Check denied(String reason, LocalDateTime notBefore) {
-            return new Check(false, reason, notBefore, 0);
-        }
-
         public boolean isAllowed() { return allowed; }
         public String getReason() { return reason; }
         public LocalDateTime getNotBefore() { return notBefore; }
@@ -116,6 +112,14 @@ public class GeminiQuotaGuard {
         long requestsLastMinute = attempts.countStartedSince(model(), minuteAgo);
         if (requestsLastMinute >= settings.budget(settings.getRpm())) {
             return new Check(false, "Requests-per-minute budget used; waiting.", now.plusSeconds(5), estimate);
+        }
+        // Even pacing: never start two calls closer together than 60 s / budget (e.g. 5 s for 12 calls a minute).
+        LocalDateTime lastStart = settings.minIntervalMillis() > 0 ? attempts.lastStartedAt(model()) : null;
+        if (lastStart != null) {
+            LocalDateTime earliest = lastStart.plusNanos(settings.minIntervalMillis() * 1_000_000L);
+            if (now.isBefore(earliest)) {
+                return new Check(false, "Pacing calls evenly over the minute; next call at " + earliest + ".", earliest, estimate);
+            }
         }
         long tokensLastMinute = attempts.sumInputTokensSince(model(), minuteAgo);
         // A single invoice bigger than the whole minute budget must still be allowed once the minute is empty.

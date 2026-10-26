@@ -48,6 +48,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * The legacy single-file extraction (InvoiceServiceImpl) with Gemini, storage and repositories mocked: files are
+ * checked before any Gemini call, invalid or inconsistent extractions are never stored as EXTRACTED, token usage is
+ * kept even on failure, the exact PDF is stored and linked, and a failed database step deletes the stored PDF again.
+ */
 @ExtendWith(MockitoExtension.class)
 class InvoiceServiceImplTest {
 

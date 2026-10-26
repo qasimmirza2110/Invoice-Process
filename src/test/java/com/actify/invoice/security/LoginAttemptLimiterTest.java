@@ -9,6 +9,10 @@ import java.time.ZoneOffset;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Login brute-force protection: five failures lock an e-mail or a client address for 15 minutes, a success only
+ * clears the e-mail counter, and old failures are forgotten. Uses a controllable clock, no waiting.
+ */
 class LoginAttemptLimiterTest {
 
     /** A clock the test can move forward. */

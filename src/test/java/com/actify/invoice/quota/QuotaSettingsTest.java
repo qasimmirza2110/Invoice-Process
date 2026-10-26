@@ -75,6 +75,40 @@ class QuotaSettingsTest {
         assertThat(BackoffAccess.seconds(10, 0.5)).isEqualTo(900);  // capped at 15 min
     }
 
+    @Test
+    void theBusinessCapOf15WinsOverAHigherAiStudioLimitAndCallsAreSpacedEvenly() {
+        QuotaSettings capped = new QuotaSettings("60", "250000", "1000", "3000", 0.8, "15", true);
+        assertThat(capped.getRpm()).isEqualTo(15);                 // lower of 60 (AI Studio) and 15 (business cap)
+        assertThat(capped.budget(capped.getRpm())).isEqualTo(12);  // 15 x 0.8
+        assertThat(capped.minIntervalMillis()).isEqualTo(5_000);   // 60 s / 12 -> one call every 5 s, not 12 at once
+        assertThat(new QuotaSettings("10", "250000", "1000", "3000", 0.8, "15", true).getRpm()).isEqualTo(10); // lower AI Studio limit wins
+        assertThat(new QuotaSettings("60", "250000", "1000", "3000", 0.8, "15", false).minIntervalMillis()).isZero();
+        assertThat(new QuotaSettings("60", "250000", "1000", "3000", 0.8, "15k", true).getProblem())
+                .contains("gemini.limits.business-max-rpm");
+    }
+
+    @Test
+    void aSecondCallInsideThePacingGapIsDeferredNotSent() {
+        Clock clock = Clock.fixed(Instant.parse("2026-10-23T09:00:10Z"), ZoneId.of("UTC"));
+        LocalDateTime now = LocalDateTime.now(clock);
+        QuotaSettings settings = new QuotaSettings("15", "250000", "1000", "3000", 0.8, "15", true);
+
+        GeminiQuotaGuard justCalled = guard(settings, clock);
+        when(attemptsOf(justCalled).lastStartedAt("test-model")).thenReturn(now.minusSeconds(2));
+        GeminiQuotaGuard.Check tooSoon = justCalled.check(true);
+        assertThat(tooSoon.isAllowed()).isFalse();
+        assertThat(tooSoon.getReason()).startsWith("Pacing calls evenly");
+        assertThat(tooSoon.getNotBefore()).isEqualTo(now.plusSeconds(3)); // 2 s ago + 5 s gap
+
+        GeminiQuotaGuard longAgo = guard(settings, clock);
+        when(attemptsOf(longAgo).lastStartedAt("test-model")).thenReturn(now.minusSeconds(6));
+        assertThat(longAgo.check(true).isAllowed()).isTrue();
+    }
+
+    private static GeminiCallAttemptRepository attemptsOf(GeminiQuotaGuard guard) {
+        return (GeminiCallAttemptRepository) ReflectionTestUtils.getField(guard, "attempts");
+    }
+
     private static GeminiQuotaGuard guard(QuotaSettings settings, Clock clock) {
         GeminiCallAttemptRepository attempts = mock(GeminiCallAttemptRepository.class);
         GeminiQuotaGuard guard = new GeminiQuotaGuard(settings, attempts, new GeminiConfig("k", "test-model", "http://x"), clock);

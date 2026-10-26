@@ -11,6 +11,7 @@ import com.actify.invoice.user.AppUser;
 import com.actify.invoice.user.AppUserService;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.web.csrf.CsrfTokenRepository;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -21,9 +22,11 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 /**
- * Login, logout and "who am I". The token travels only in the HttpOnly TASK8_AUTH cookie;
- * it is never part of a response body, so page JavaScript never sees it.
+ * Login, logout and "who am I". The token travels only in the HttpOnly INVOICE_PROCESS_AUTH cookie;
+ * it is never part of a response body, so frontend JavaScript never sees it.
  * All POSTs here need the X-XSRF-TOKEN header (CSRF), including login.
+ * The CSRF token is replaced exactly here - at login and logout - so a token known before the login is useless after
+ * it; during a session it stays the same (see SecurityConfig: no rotation on every request).
  */
 @RestController
 @RequestMapping("/api/auth")
@@ -34,22 +37,31 @@ public class AuthController {
     private final AuthCookies authCookies;
     private final CurrentUserService currentUser;
     private final AppUserService userService;
+    private final CsrfTokenRepository csrfTokens;
 
     public AuthController(LoginService loginService, JwtTokenService tokenService, AuthCookies authCookies,
-                          CurrentUserService currentUser, AppUserService userService) {
+                          CurrentUserService currentUser, AppUserService userService, CsrfTokenRepository csrfTokens) {
         this.loginService = loginService;
         this.tokenService = tokenService;
         this.authCookies = authCookies;
         this.currentUser = currentUser;
         this.userService = userService;
+        this.csrfTokens = csrfTokens;
+    }
+
+    /** A fresh XSRF-TOKEN cookie (the old one is overwritten). */
+    private void rotateCsrfToken(HttpServletRequest request, HttpServletResponse response) {
+        csrfTokens.saveToken(csrfTokens.generateToken(request), request, response);
     }
 
     /** 200 + cookie on success; 401 with one generic message on any failure; 429 while locked. */
     @PostMapping(value = "/login", consumes = MediaType.APPLICATION_JSON_VALUE)
     public MeResponse login(@RequestBody LoginRequest body, HttpServletRequest request, HttpServletResponse response) {
-        // getRemoteAddr() only: X-Forwarded-For could be forged by anyone, and there is no trusted proxy.
+        // getRemoteAddr() only - this code never reads X-Forwarded-For itself (anyone could forge it). In the render
+        // profile Tomcat may replace the address with the client's, but only for an internal proxy (forward headers).
         AppUser user = loginService.login(body.getEmail(), body.getPassword(), request.getRemoteAddr());
         authCookies.setToken(request, response, tokenService.issue(user), tokenService.getLifetime());
+        rotateCsrfToken(request, response);
         return MeResponse.from(AuthenticatedUser.from(user));
     }
 
@@ -57,6 +69,7 @@ public class AuthController {
     @PostMapping("/logout")
     public ResponseEntity<Void> logout(HttpServletRequest request, HttpServletResponse response) {
         authCookies.clear(request, response);
+        rotateCsrfToken(request, response);
         return ResponseEntity.noContent().build();
     }
 
@@ -65,6 +78,7 @@ public class AuthController {
     public ResponseEntity<Void> logoutEverywhere(HttpServletRequest request, HttpServletResponse response) {
         userService.revokeAllTokens(currentUser.require().getId());
         authCookies.clear(request, response);
+        rotateCsrfToken(request, response);
         return ResponseEntity.noContent().build();
     }
 

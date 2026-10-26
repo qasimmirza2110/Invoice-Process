@@ -184,6 +184,56 @@ class BatchQueuePgIntegrationTest extends AbstractQueuePgTest {
         }
     }
 
+    /**
+     * The same bytes sent by the same vendor into TWO DIFFERENT batches at the same moment: both requests pass the
+     * cheap pre-check (nothing stored yet), then wait on the vendor lock. Exactly one may be accepted.
+     * (Before the vendor lock, each request only locked its own batch row, so both were accepted.)
+     */
+    @Test
+    void sameFileIntoTwoBatchesAtTheSameMomentIsAcceptedOnlyOnce() throws Exception {
+        long batchA = createBatch("race-a");
+        long batchB = createBatch("race-b");
+        byte[] pdf = syntheticPdf(unique("race"));
+
+        CountDownLatch vendorLocked = new CountDownLatch(1);
+        CountDownLatch releaseVendor = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(3);
+        try {
+            Future<?> holder = pool.submit(() -> transactionTemplate.execute(s -> {
+                jdbc.queryForObject("select id from app_users where id = ? for update", Long.class, vendor.getId());
+                vendorLocked.countDown();
+                await(releaseVendor);     // both uploads now reach the vendor lock and wait here
+                return null;
+            }));
+            assertThat(vendorLocked.await(20, TimeUnit.SECONDS)).isTrue();
+            Future<ResponseEntity<String>> intoA = pool.submit(() -> uploadFile(batchA, pdf, "a.pdf", null));
+            Future<ResponseEntity<String>> intoB = pool.submit(() -> uploadFile(batchB, pdf, "b.pdf", null));
+            Thread.sleep(1500);           // give both requests time to pass the pre-check and block on the lock
+            releaseVendor.countDown();
+            holder.get(20, TimeUnit.SECONDS);
+
+            List<HttpStatus> statuses = new ArrayList<>();
+            statuses.add(intoA.get(20, TimeUnit.SECONDS).getStatusCode());
+            statuses.add(intoB.get(20, TimeUnit.SECONDS).getStatusCode());
+            assertThat(statuses).containsExactlyInAnyOrder(HttpStatus.ACCEPTED, HttpStatus.UNPROCESSABLE_ENTITY);
+            assertThat(jdbc.queryForObject("select count(*) from invoices i join invoice_documents d "
+                    + "on d.id = i.source_document_id where i.owner_user_id = ? and d.sha256 = ?", Long.class,
+                    vendor.getId(), com.actify.invoice.storage.InvoiceDocumentStorage.sha256Hex(pdf))).isEqualTo(1L);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /** Duplicates are per vendor: another vendor uploading the same bytes is accepted and learns nothing. */
+    @Test
+    void anotherVendorMayUploadTheSameBytes() throws Exception {
+        byte[] pdf = syntheticPdf(unique("shared"));
+        assertThat(uploadFile(createBatch("mine"), pdf, "x.pdf", null).getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+
+        actAs(createUser(Role.VENDOR));
+        assertThat(uploadFile(createBatch("theirs"), pdf, "x.pdf", null).getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+    }
+
     @Test
     void twoConcurrentClaimsNeverGetTheSameJob() throws Exception {
         long batchId = createBatch("skip-locked");
@@ -239,6 +289,84 @@ class BatchQueuePgIntegrationTest extends AbstractQueuePgTest {
         assertThat(jdbc.queryForObject("select count(*) from invoice_items where invoice_id = ?", Integer.class, id)).isEqualTo(1);
         assertThat(events(id)).containsExactly("null->QUEUED by user:" + vendor.getId(), "QUEUED->PROCESSING by system",
                 "PROCESSING->NEEDS_REVIEW by system");
+    }
+
+    /**
+     * Vendor B uploads the same bytes AND the same invoice (seller + number) vendor A already uploaded. Duplicates are
+     * vendor-scoped: vendor B's invoice is accepted, extracted and gets NO duplicate reason - so nobody (vendor, reviewer
+     * or admin) learns from it that vendor A holds the same file or invoice.
+     */
+    @Test
+    void aVendorDoesNotLearnAboutAnotherVendorsIdenticalUpload() throws Exception {
+        drainQueue(); // leftovers of earlier runs must not be claimed first
+        byte[] pdf = syntheticPdf(unique("cross-vendor"));
+        String number = "XV-" + UUID.randomUUID().toString().substring(0, 6);
+        long first = json(uploadFile(createBatch("vendor-a"), pdf, "a.pdf", null).getBody()).get("invoiceId").asLong();
+        doReturn(new LlmExtractionResponse(validResult(number), null)).when(llmInvoiceExtractor).extract(any(byte[].class));
+        assertThat(worker.processNextJob()).isTrue(); // vendor A's invoice gets the seller + number
+        assertThat(jdbc.queryForObject("select invoice_number from invoices where id = ?", String.class, first)).isEqualTo(number);
+
+        AppUser vendorB = createUser(Role.VENDOR);
+        actAs(vendorB);
+        long id = json(uploadFile(createBatch("vendor-b"), pdf, "b.pdf", null).getBody()).get("invoiceId").asLong();
+        assertThat(worker.processNextJob()).isTrue();
+        assertThat(status(id)).isEqualTo("NEEDS_REVIEW");
+        assertThat(jdbc.queryForList("select code from invoice_review_reasons where invoice_id = ?", String.class, id))
+                .doesNotContain("DUPLICATE_FILE", "DUPLICATE_INVOICE_NO");
+
+        JsonNode asVendor = json(restTemplate.getForObject("/api/invoices/" + id + "/review-reasons", String.class));
+        List<String> vendorCodes = new ArrayList<>();
+        asVendor.forEach(r -> vendorCodes.add(r.get("code").asText()));
+        JsonNode list = json(restTemplate.getForObject("/api/invoices?batchId="
+                + jdbc.queryForObject("select batch_id from invoices where id = ?", Long.class, id), String.class));
+        assertThat(list.get(0).get("reviewReasonCount").asLong()).isEqualTo(vendorCodes.size());
+    }
+
+    /**
+     * The same vendor uploads a DIFFERENT PDF of an invoice they already sent (same seller + number, other formatting).
+     * Intake cannot know (different bytes); after extraction it gets DUPLICATE_INVOICE_NO naming the vendor's OWN
+     * earlier invoice, the vendor can read why, and it cannot be submitted for approval.
+     */
+    @Test
+    void theSameVendorsSameInvoiceInAnotherPdfIsFlaggedAfterExtractionAndCannotBeSubmitted() throws Exception {
+        drainQueue(); // leftovers of earlier runs must not be claimed first
+        String number = "SV-" + UUID.randomUUID().toString().substring(0, 6);
+        long first = json(uploadFile(createBatch("first"), syntheticPdf(unique("same-a")), "scan-1.pdf", null).getBody())
+                .get("invoiceId").asLong();
+        doReturn(new LlmExtractionResponse(validResult(number), null)).when(llmInvoiceExtractor).extract(any(byte[].class));
+        assertThat(worker.processNextJob()).isTrue();
+        assertThat(status(first)).isEqualTo("NEEDS_REVIEW");
+
+        long second = json(uploadFile(createBatch("second"), syntheticPdf(unique("same-b")), "scan-2.pdf", null).getBody())
+                .get("invoiceId").asLong();
+        InvoiceExtractionResult again = validResult(number);
+        again.setInvoiceNumber(" " + number.toLowerCase(java.util.Locale.ROOT) + " ");                  // other formatting
+        again.setSellerName(again.getSellerName().toUpperCase(java.util.Locale.ROOT) + ".");
+        doReturn(new LlmExtractionResponse(again, null)).when(llmInvoiceExtractor).extract(any(byte[].class));
+        assertThat(worker.processNextJob()).isTrue();
+
+        List<String> messages = jdbc.queryForList("select message from invoice_review_reasons where invoice_id = ? "
+                + "and code = 'DUPLICATE_INVOICE_NO'", String.class, second);
+        assertThat(messages).hasSize(1);
+        assertThat(messages.get(0)).startsWith("You already uploaded invoice " + number).contains("(invoice " + first + ",");
+
+        JsonNode asVendor = json(restTemplate.getForObject("/api/invoices/" + second + "/review-reasons", String.class));
+        List<String> vendorCodes = new ArrayList<>();
+        asVendor.forEach(r -> vendorCodes.add(r.get("code").asText()));
+        assertThat(vendorCodes).contains("DUPLICATE_INVOICE_NO"); // the vendor's own earlier invoice: safe to explain
+
+        // Assign + try to submit: refused while it duplicates the vendor's earlier invoice.
+        AppUser reviewer = createUser(Role.REVIEWER);
+        jdbc.update("update invoices set assigned_reviewer_id = ? where id = ?", reviewer.getId(), second);
+        actAs(reviewer);
+        int version = jdbc.queryForObject("select max(version_number) from invoice_versions where invoice_id = ?", Integer.class, second);
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        ResponseEntity<String> submit = restTemplate.postForEntity("/api/invoices/" + second + "/submit",
+                new HttpEntity<>("{\"version\":" + version + "}", headers), String.class);
+        assertThat(submit.getStatusCodeValue()).isEqualTo(422);
+        assertThat(json(submit.getBody()).get("message").asText()).contains("This is a duplicate").contains("invoice " + first);
+        assertThat(status(second)).isEqualTo("NEEDS_REVIEW");
     }
 
     @Test

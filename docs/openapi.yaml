@@ -1,0 +1,801 @@
+openapi: 3.0.3
+info:
+  title: Actify Invoice Process API
+  version: 0.0.1-SNAPSHOT
+  description: |
+    API-only backend for invoice upload, Gemini extraction, human review and approval.
+    Written by hand from the source code on 2026-10-27 (no springdoc dependency). The prose reference with business
+    rules, side effects and tests is docs/REACT_BACKEND_HANDOFF.md; if the two disagree, the code is right.
+
+    Authentication: HttpOnly cookie INVOICE_PROCESS_AUTH set by POST /api/auth/login (JWT, 30 min).
+    CSRF: every POST/PUT/DELETE must send header X-XSRF-TOKEN equal to the readable XSRF-TOKEN cookie.
+    Same-origin only: no CORS headers are sent.
+servers:
+  - url: http://127.0.0.1:8088
+    description: Local demo (loopback only)
+security:
+  - authCookie: []
+tags:
+  - name: health
+  - name: auth
+  - name: batches
+  - name: invoices
+  - name: review
+  - name: admin
+  - name: dashboard
+
+paths:
+  /api/health:
+    get:
+      tags: [health]
+      summary: 'Liveness check (public, reveals nothing but UP)'
+      security: []
+      responses:
+        '200':
+          description: Process is running
+          content:
+            application/json:
+              schema: { type: object, properties: { status: { type: string, enum: [UP] } } }
+
+  /api/auth/login:
+    post:
+      tags: [auth]
+      summary: 'Log in; sets INVOICE_PROCESS_AUTH and a fresh XSRF-TOKEN cookie'
+      security: []
+      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Logged in
+          headers:
+            Set-Cookie: { schema: { type: string }, description: 'INVOICE_PROCESS_AUTH=<jwt>; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800' }
+          content: { application/json: { schema: { $ref: '#/components/schemas/Me' } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      summary: 'Delete the auth cookie in this browser (works with an expired session)'
+      security: []
+      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
+      responses:
+        '204': { description: Logged out }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/auth/logout-all:
+    post:
+      tags: [auth]
+      summary: 'Revoke every token of the current user (token version +1)'
+      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
+      responses:
+        '204': { description: All sessions ended }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/auth/me:
+    get:
+      tags: [auth]
+      summary: 'The logged-in user (role read from the database)'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Me' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/batches:
+    post:
+      tags: [batches]
+      summary: 'Create an upload batch (VENDOR, ADMIN)'
+      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/CreateBatchRequest' } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/BatchSummary' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+    get:
+      tags: [batches]
+      summary: 'Own batches (admin: all), newest first (VENDOR, ADMIN)'
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/BatchSummary' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /api/batches/{id}:
+    get:
+      tags: [batches]
+      summary: 'Batch detail with its invoices and rejections (owner or admin)'
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/BatchDetail' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/batches/{id}/files:
+    post:
+      tags: [batches]
+      summary: 'Upload ONE PDF into the batch; 202 accepted and queued, 422 rejected'
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary, description: 'PDF, max 10 MB, must start with %PDF-' }
+                relativePath: { type: string, description: 'webkitRelativePath for folder uploads; sub-folder files are rejected' }
+                source: { type: string, enum: [LOCAL, GOOGLE_DRIVE, ONEDRIVE] }
+      responses:
+        '202': { description: Accepted and queued, content: { application/json: { schema: { $ref: '#/components/schemas/FileIntakeResponse' } } } }
+        '422': { description: 'Rejected (INVALID_FILE, DUPLICATE_FILE, NESTED_FOLDER, SOURCE_MISMATCH)', content: { application/json: { schema: { $ref: '#/components/schemas/FileIntakeResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/batches/{id}/close:
+    post:
+      tags: [batches]
+      summary: 'Close the batch (no more files)'
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      responses:
+        '200': { description: Closed, content: { application/json: { schema: { $ref: '#/components/schemas/BatchSummary' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/cloud-sources:
+    get:
+      tags: [batches]
+      summary: 'Google Drive / OneDrive picker status and public browser config (VENDOR, ADMIN)'
+      responses:
+        '200':
+          description: One entry per provider
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/CloudSource' } } } }
+
+  /api/invoices:
+    get:
+      tags: [invoices]
+      summary: 'Role-scoped invoice list (vendor own, reviewer assigned, admin all), id ascending'
+      parameters:
+        - { name: status, in: query, schema: { $ref: '#/components/schemas/InvoiceStatus' } }
+        - { name: category, in: query, schema: { type: string } }
+        - { name: batchId, in: query, schema: { type: integer, format: int64 } }
+        - { name: unassigned, in: query, schema: { type: boolean } }
+        - { name: legacy, in: query, schema: { type: boolean, default: false }, description: 'ADMIN: true = old single-file invoices' }
+        - { name: page, in: query, schema: { type: integer, default: 0, minimum: 0 } }
+        - { name: size, in: query, schema: { type: integer, default: 50, minimum: 1, maximum: 200 } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/InvoiceSummary' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+  /api/invoices/{id}:
+    get:
+      tags: [invoices]
+      summary: 'One invoice (404 when it does not exist or is not yours)'
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Invoice' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+    put:
+      tags: [review]
+      summary: 'Save a complete correction as a new version (assigned REVIEWER; ADMIN on legacy invoices only)'
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/InvoiceUpdate' } } }
+      responses:
+        '200': { description: Saved (changed=false when identical), content: { application/json: { schema: { $ref: '#/components/schemas/InvoiceSaveResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/invoices/{id}/review-reasons:
+    get:
+      tags: [invoices]
+      summary: 'Reasons recorded at extraction time'
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/ReviewReasonResponse' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/invoices/{id}/checks:
+    get:
+      tags: [invoices]
+      summary: 'Automatic checks on the current data (empty = all pass)'
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/ReviewReason' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/invoices/{id}/events:
+    get:
+      tags: [invoices]
+      summary: 'Append-only status and assignment history, oldest first'
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Event' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/invoices/{id}/versions:
+    get:
+      tags: [invoices]
+      summary: 'Version history, newest first, without snapshots'
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/InvoiceVersion' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/invoices/{id}/versions/compare:
+    get:
+      tags: [invoices]
+      summary: 'Field differences between two versions'
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { name: from, in: query, required: true, schema: { type: integer } }
+        - { name: to, in: query, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/VersionComparison' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/invoices/{id}/versions/{versionNumber}:
+    get:
+      tags: [invoices]
+      summary: 'One version including its snapshot'
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { name: versionNumber, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/InvoiceVersion' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/invoices/{id}/document:
+    get:
+      tags: [invoices]
+      summary: 'The original uploaded PDF of this invoice (SHA-256 verified on read)'
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '200': { description: PDF bytes, content: { application/pdf: { schema: { type: string, format: binary } } } }
+        '404': { $ref: '#/components/responses/Error' }
+        '500': { $ref: '#/components/responses/Error' }
+  /api/documents/{documentId}:
+    get:
+      tags: [invoices]
+      summary: 'Same PDF addressed by sourceDocument.id (kept for older clients)'
+      parameters: [ { name: documentId, in: path, required: true, schema: { type: string, format: uuid } } ]
+      responses:
+        '200': { description: PDF bytes, content: { application/pdf: { schema: { type: string, format: binary } } } }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/invoices/{id}/submit:
+    post:
+      tags: [review]
+      summary: 'Assigned REVIEWER submits an exact version for approval'
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DecisionRequest' } } } }
+      responses:
+        '200': { description: PENDING_APPROVAL, content: { application/json: { schema: { $ref: '#/components/schemas/Invoice' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/invoices/{id}/approve:
+    post:
+      tags: [admin]
+      summary: 'ADMIN approves the submitted, current version (reason optional)'
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DecisionRequest' } } } }
+      responses: { '200': { $ref: '#/components/responses/Invoice' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
+  /api/invoices/{id}/reject:
+    post:
+      tags: [admin]
+      summary: 'ADMIN rejects the submitted, current version (reason required)'
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DecisionRequest' } } } }
+      responses: { '200': { $ref: '#/components/responses/Invoice' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
+  /api/invoices/{id}/send-back:
+    post:
+      tags: [admin]
+      summary: 'ADMIN returns a PENDING_APPROVAL invoice to the reviewer (reason required)'
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DecisionRequest' } } } }
+      responses: { '200': { $ref: '#/components/responses/Invoice' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
+  /api/invoices/{id}/reopen:
+    post:
+      tags: [admin]
+      summary: 'ADMIN reopens an APPROVED/REJECTED invoice (reason required)'
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DecisionRequest' } } } }
+      responses: { '200': { $ref: '#/components/responses/Invoice' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
+  /api/invoices/{id}/requeue:
+    post:
+      tags: [admin]
+      summary: 'ADMIN puts a FAILED batch invoice back into the queue (reason required)'
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DecisionRequest' } } } }
+      responses: { '200': { $ref: '#/components/responses/Invoice' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
+  /api/invoices/extract:
+    post:
+      tags: [admin]
+      summary: 'LEGACY single-file extraction (ADMIN; calls Gemini synchronously; 409 when switched off)'
+      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { type: object, required: [file], properties: { file: { type: string, format: binary } } }
+      responses:
+        '201': { description: Extracted and stored, content: { application/json: { schema: { $ref: '#/components/schemas/Invoice' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/Error' }
+
+  /api/categories:
+    get:
+      tags: [admin]
+      summary: 'Active categories (any logged-in role)'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Category' } } } } }
+  /api/admin/categories:
+    get:
+      tags: [admin]
+      summary: 'All categories (ADMIN)'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Category' } } } } }
+    post:
+      tags: [admin]
+      summary: 'Create a category (ADMIN)'
+      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { code: { type: string, example: IT }, displayName: { type: string } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/Category' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/admin/categories/{code}/active:
+    put:
+      tags: [admin]
+      summary: 'Activate / deactivate a category (ADMIN)'
+      parameters:
+        - { name: code, in: path, required: true, schema: { type: string } }
+        - { $ref: '#/components/parameters/Csrf' }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [active], properties: { active: { type: boolean } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Category' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/admin/invoices/{id}/category:
+    put:
+      tags: [admin]
+      summary: 'Set or clear an invoice''s category (ADMIN)'
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, properties: { categoryCode: { type: string, nullable: true } } } } }
+      responses: { '200': { $ref: '#/components/responses/Invoice' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
+  /api/admin/intake:
+    get:
+      tags: [admin]
+      summary: 'Intake board - QUEUED/PROCESSING/NEEDS_REVIEW batch invoices, split needsAssignment/assigned (ADMIN)'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+  /api/admin/assignments:
+    post:
+      tags: [admin]
+      summary: 'Assign / reassign / unassign a reviewer for 1-200 invoices (ADMIN)'
+      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AssignmentRequest' } } } }
+      responses:
+        '200':
+          description: One result per invoice
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AssignmentResult' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/admin/queue/status:
+    get:
+      tags: [admin]
+      summary: 'Extraction worker and Gemini pacing status (ADMIN; key presence only)'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+  /api/admin/users:
+    get:
+      tags: [admin]
+      summary: 'All users (ADMIN)'
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/User' } } } } }
+    post:
+      tags: [admin]
+      summary: 'Create a user (ADMIN)'
+      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateUserRequest' } } } }
+      responses:
+        '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/admin/users/{id}/role:
+    put:
+      tags: [admin]
+      summary: 'Change role (ADMIN; ends the user''s sessions)'
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { role: { $ref: '#/components/schemas/Role' } } } } } }
+      responses: { '200': { $ref: '#/components/responses/User' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
+  /api/admin/users/{id}/display-name:
+    put:
+      tags: [admin]
+      summary: 'Rename (ADMIN; blank = e-mail name)'
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { displayName: { type: string, maxLength: 100 } } } } } }
+      responses: { '200': { $ref: '#/components/responses/User' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' } }
+  /api/admin/users/{id}/enabled:
+    put:
+      tags: [admin]
+      summary: 'Enable / disable (ADMIN; disabling ends the user''s sessions)'
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [enabled], properties: { enabled: { type: boolean } } } } } }
+      responses: { '200': { $ref: '#/components/responses/User' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
+  /api/admin/users/{id}/categories:
+    get:
+      tags: [admin]
+      summary: 'A reviewer''s category codes (ADMIN)'
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { type: string } } } } }
+        '404': { $ref: '#/components/responses/Error' }
+    put:
+      tags: [admin]
+      summary: 'Replace a reviewer''s category list (ADMIN)'
+      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, properties: { categories: { type: array, items: { type: string } } } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: array, items: { type: string } } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /api/dashboard/vendor:
+    get:
+      tags: [dashboard]
+      summary: 'VENDOR dashboard (403 for other roles)'
+      parameters: [ { $ref: '#/components/parameters/Days' } ]
+      responses: { '200': { $ref: '#/components/responses/Metrics' }, '403': { $ref: '#/components/responses/Error' } }
+  /api/dashboard/reviewer:
+    get:
+      tags: [dashboard]
+      summary: 'REVIEWER dashboard (403 for other roles)'
+      parameters: [ { $ref: '#/components/parameters/Days' } ]
+      responses: { '200': { $ref: '#/components/responses/Metrics' }, '403': { $ref: '#/components/responses/Error' } }
+  /api/dashboard/admin:
+    get:
+      tags: [dashboard]
+      summary: 'ADMIN dashboard (403 for other roles)'
+      parameters: [ { $ref: '#/components/parameters/Days' } ]
+      responses: { '200': { $ref: '#/components/responses/Metrics' }, '403': { $ref: '#/components/responses/Error' } }
+
+components:
+  securitySchemes:
+    authCookie:
+      type: apiKey
+      in: cookie
+      name: INVOICE_PROCESS_AUTH
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+    Csrf:
+      name: X-XSRF-TOKEN
+      in: header
+      required: true
+      description: Value of the XSRF-TOKEN cookie (missing or wrong = 403)
+      schema: { type: string }
+    Days: { name: days, in: query, schema: { type: integer, default: 7, minimum: 1, maximum: 90 } }
+  responses:
+    Error:
+      description: Standard error body
+      content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    Invoice:
+      description: The invoice after the change
+      content: { application/json: { schema: { $ref: '#/components/schemas/Invoice' } } }
+    User:
+      description: The user after the change
+      content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
+    Metrics:
+      description: Role-scoped metrics; every rate has numerator, denominator and definition
+      content: { application/json: { schema: { type: object, additionalProperties: true } } }
+  schemas:
+    Role: { type: string, enum: [VENDOR, REVIEWER, ADMIN] }
+    InvoiceStatus:
+      type: string
+      enum: [CREATED, EXTRACTED, FAILED, QUEUED, PROCESSING, NEEDS_REVIEW, PENDING_APPROVAL, APPROVED, REJECTED]
+    ErrorResponse:
+      type: object
+      properties:
+        timestamp: { type: string, example: '2026-10-23T10:15:00' }
+        status: { type: integer }
+        error: { type: string }
+        message: { type: string, description: Safe to show to the user }
+        path: { type: string }
+        fieldErrors:
+          type: array
+          nullable: true
+          items: { type: object, properties: { field: { type: string }, message: { type: string } } }
+        errorId: { type: string, description: 'Only on unexpected 500s' }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties: { email: { type: string, format: email }, password: { type: string, format: password } }
+    Me:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        email: { type: string }
+        name: { type: string, description: 'displayName when set, else the e-mail before "@"' }
+        displayName: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+    User:
+      allOf:
+        - $ref: '#/components/schemas/Me'
+        - type: object
+          properties:
+            enabled: { type: boolean }
+            createdAt: { type: string }
+            updatedAt: { type: string }
+    CreateUserRequest:
+      type: object
+      required: [email, role, password]
+      properties:
+        email: { type: string }
+        displayName: { type: string, maxLength: 100 }
+        role: { $ref: '#/components/schemas/Role' }
+        password: { type: string, description: '12-72 UTF-8 bytes' }
+    CreateBatchRequest:
+      type: object
+      properties:
+        label: { type: string, maxLength: 255 }
+        defaultCategoryCode: { type: string, nullable: true }
+        source: { type: string, enum: [LOCAL, GOOGLE_DRIVE, ONEDRIVE], default: LOCAL }
+    BatchSummary:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        label: { type: string }
+        source: { type: string, enum: [LOCAL, GOOGLE_DRIVE, ONEDRIVE] }
+        status: { type: string, enum: [OPEN, CLOSED] }
+        defaultCategoryCode: { type: string, nullable: true }
+        ownerUserId: { type: integer, format: int64 }
+        acceptedCount: { type: integer }
+        rejectedCount: { type: integer }
+        createdAt: { type: string }
+        closedAt: { type: string, nullable: true }
+    BatchDetail:
+      type: object
+      properties:
+        batch: { $ref: '#/components/schemas/BatchSummary' }
+        statusCounts: { type: object, additionalProperties: { type: integer } }
+        invoices:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer, format: int64 }
+              fileName: { type: string }
+              status: { $ref: '#/components/schemas/InvoiceStatus' }
+              queuePosition: { type: integer, nullable: true }
+              failureReason: { type: string, nullable: true }
+              createdAt: { type: string }
+        rejections:
+          type: array
+          items: { type: object, properties: { fileName: { type: string }, code: { type: string }, message: { type: string } } }
+    FileIntakeResponse:
+      type: object
+      properties:
+        fileName: { type: string }
+        accepted: { type: boolean }
+        invoiceId: { type: integer, format: int64, nullable: true }
+        status: { allOf: [ { $ref: '#/components/schemas/InvoiceStatus' } ], nullable: true }
+        code: { type: string, nullable: true, enum: [INVALID_FILE, DUPLICATE_FILE, NESTED_FOLDER, SOURCE_MISMATCH, null] }
+        message: { type: string }
+    CloudSource:
+      type: object
+      properties:
+        source: { type: string, enum: [GOOGLE_DRIVE, ONEDRIVE] }
+        label: { type: string }
+        status: { type: string, enum: [NOT_CONFIGURED, CONFIGURED_NOT_LIVE_TESTED, LIVE_TESTED] }
+        mockTested: { type: boolean }
+        problems: { type: array, items: { type: string } }
+        setupHint: { type: string }
+        browserConfig: { type: object, additionalProperties: { type: string }, description: Public values only }
+    InvoiceSummary:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        status: { $ref: '#/components/schemas/InvoiceStatus' }
+        fileName: { type: string }
+        invoiceNumber: { type: string, nullable: true }
+        sellerName: { type: string, nullable: true }
+        totalAmount: { type: number, nullable: true }
+        currency: { type: string, nullable: true }
+        categoryCode: { type: string, nullable: true }
+        ownerUserId: { type: integer, format: int64, nullable: true }
+        batchId: { type: integer, format: int64, nullable: true }
+        assignedReviewerId: { type: integer, format: int64, nullable: true }
+        assignedReviewerName: { type: string, nullable: true, description: 'null for vendors' }
+        submittedVersion: { type: integer, nullable: true }
+        reviewReasonCount: { type: integer }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+    InvoiceItem:
+      type: object
+      properties:
+        description: { type: string, nullable: true }
+        quantity: { type: number, nullable: true }
+        unitPrice: { type: number, nullable: true }
+        taxRate: { type: number, nullable: true }
+        lineTotal: { type: number, nullable: true }
+    SourceDocument:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        sha256: { type: string }
+        sizeBytes: { type: integer, format: int64 }
+        contentType: { type: string }
+        originalFileName: { type: string }
+        createdAt: { type: string }
+        url: { type: string }
+    Invoice:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        status: { $ref: '#/components/schemas/InvoiceStatus' }
+        invoiceNumber: { type: string, nullable: true }
+        invoiceDate: { type: string, format: date, nullable: true }
+        sellerName: { type: string, nullable: true }
+        sellerTaxId: { type: string, nullable: true }
+        buyerName: { type: string, nullable: true }
+        buyerTaxId: { type: string, nullable: true }
+        currency: { type: string, nullable: true }
+        subtotal: { type: number, nullable: true }
+        discountAmount: { type: number, nullable: true }
+        shippingAmount: { type: number, nullable: true }
+        taxAmount: { type: number, nullable: true }
+        totalAmount: { type: number, nullable: true }
+        sourceFileName: { type: string }
+        sourceFileSize: { type: integer, format: int64 }
+        failureReason: { type: string, nullable: true }
+        createdAt: { type: string }
+        updatedAt: { type: string }
+        items: { type: array, items: { $ref: '#/components/schemas/InvoiceItem' } }
+        tokenUsage: { type: object, additionalProperties: true }
+        currentVersion: { type: integer, nullable: true }
+        sourceDocument: { allOf: [ { $ref: '#/components/schemas/SourceDocument' } ], nullable: true }
+        workflow:
+          type: object
+          properties:
+            legacy: { type: boolean }
+            ownerUserId: { type: integer, format: int64, nullable: true }
+            batchId: { type: integer, format: int64, nullable: true }
+            categoryCode: { type: string, nullable: true }
+            assignedReviewerId: { type: integer, format: int64, nullable: true }
+            submittedVersion: { type: integer, nullable: true }
+    InvoiceUpdate:
+      type: object
+      description: The COMPLETE corrected invoice (not a patch); unknown fields are rejected. Send amounts as strings.
+      required: [baseVersion, items]
+      properties:
+        baseVersion: { type: integer }
+        changeReason: { type: string }
+        invoiceNumber: { type: string }
+        invoiceDate: { type: string, example: '2026-10-06' }
+        sellerName: { type: string }
+        sellerTaxId: { type: string, nullable: true }
+        buyerName: { type: string, nullable: true }
+        buyerTaxId: { type: string, nullable: true }
+        currency: { type: string, example: INR }
+        subtotal: { type: string, example: '10500.00' }
+        discountAmount: { type: string, nullable: true }
+        shippingAmount: { type: string, nullable: true }
+        taxAmount: { type: string, nullable: true }
+        totalAmount: { type: string, example: '12390.00' }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              description: { type: string }
+              quantity: { type: string }
+              unitPrice: { type: string }
+              taxRate: { type: string }
+              lineTotal: { type: string }
+    InvoiceSaveResponse:
+      type: object
+      properties:
+        changed: { type: boolean }
+        invoice: { $ref: '#/components/schemas/Invoice' }
+    ReviewReason:
+      type: object
+      properties:
+        code: { type: string, example: TOTAL_MISMATCH }
+        field: { type: string, nullable: true }
+        message: { type: string }
+    ReviewReasonResponse:
+      allOf:
+        - $ref: '#/components/schemas/ReviewReason'
+        - type: object
+          properties: { versionNumber: { type: integer } }
+    Event:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        fromStatus: { $ref: '#/components/schemas/InvoiceStatus' }
+        toStatus: { $ref: '#/components/schemas/InvoiceStatus' }
+        actorUserId: { type: integer, format: int64, nullable: true }
+        actorName: { type: string, nullable: true }
+        versionNumber: { type: integer, nullable: true }
+        reason: { type: string, nullable: true }
+        createdAt: { type: string }
+    FieldChange:
+      type: object
+      properties:
+        field: { type: string }
+        changeType: { type: string }
+        from: { type: string, nullable: true }
+        to: { type: string, nullable: true }
+    InvoiceVersion:
+      type: object
+      properties:
+        invoiceId: { type: integer, format: int64 }
+        versionNumber: { type: integer }
+        changeSource: { type: string, enum: [LLM_EXTRACTION, MANUAL_EDIT, LEGACY_BASELINE] }
+        changeReason: { type: string, nullable: true }
+        changedBy: { type: string, nullable: true }
+        changedByName: { type: string, nullable: true }
+        createdAt: { type: string }
+        sourceDocument: { allOf: [ { $ref: '#/components/schemas/SourceDocument' } ], nullable: true }
+        changedFields: { type: array, items: { $ref: '#/components/schemas/FieldChange' } }
+        snapshot: { type: object, additionalProperties: true, description: 'Only on GET /versions/{n}' }
+    VersionComparison:
+      type: object
+      properties:
+        invoiceId: { type: integer, format: int64 }
+        fromVersion: { type: integer }
+        toVersion: { type: integer }
+        differences: { type: array, items: { $ref: '#/components/schemas/FieldChange' } }
+    DecisionRequest:
+      type: object
+      properties:
+        version: { type: integer, description: 'submit/approve/reject: the exact version' }
+        reason: { type: string, description: 'required for reject, send-back, reopen, requeue' }
+    AssignmentRequest:
+      type: object
+      required: [invoiceIds]
+      properties:
+        invoiceIds: { type: array, minItems: 1, maxItems: 200, items: { type: integer, format: int64 } }
+        reviewerId: { type: integer, format: int64, nullable: true }
+        reassign: { type: boolean, default: false }
+    AssignmentResult:
+      type: object
+      properties:
+        invoiceId: { type: integer, format: int64 }
+        assigned: { type: boolean }
+        message: { type: string }
+        status: { $ref: '#/components/schemas/InvoiceStatus' }
+        reviewerId: { type: integer, format: int64, nullable: true }
+        reviewerName: { type: string, nullable: true }
+    Category:
+      type: object
+      properties:
+        code: { type: string }
+        displayName: { type: string }
+        active: { type: boolean }
+        createdAt: { type: string }

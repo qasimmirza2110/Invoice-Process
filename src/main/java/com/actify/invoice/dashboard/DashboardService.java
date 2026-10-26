@@ -9,6 +9,7 @@ import com.actify.invoice.queue.ExtractionWorker;
 import com.actify.invoice.repository.InvoiceVersionRepository;
 import com.actify.invoice.security.AuthenticatedUser;
 import com.actify.invoice.security.CurrentUserService;
+import com.actify.invoice.user.UserNames;
 import com.actify.invoice.versioning.InvoiceSnapshot;
 import com.actify.invoice.versioning.InvoiceSnapshotMapper;
 import org.springframework.stereotype.Service;
@@ -23,6 +24,7 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -186,43 +188,46 @@ public class DashboardService {
         return result;
     }
 
+    // Status-based queries skip assignment audit rows (from_status = to_status, see WorkflowService#recordAssignment).
     private LocalDateTime oldestNeedsReviewSince(Long reviewerId) {
         List<LocalDateTime> since = em.createQuery("select max(e.createdAt) from InvoiceWorkflowEvent e, Invoice i "
                 + "where e.invoiceId = i.id and i.assignedReviewerId = :uid "
                 + "and i.status = com.actify.invoice.entity.InvoiceStatus.NEEDS_REVIEW "
-                + "and e.toStatus = com.actify.invoice.entity.InvoiceStatus.NEEDS_REVIEW group by i.id", LocalDateTime.class)
+                + "and e.toStatus = com.actify.invoice.entity.InvoiceStatus.NEEDS_REVIEW and (e.fromStatus is null or e.fromStatus <> e.toStatus) group by i.id", LocalDateTime.class)
                 .setParameter("uid", reviewerId).getResultList();
         return since.isEmpty() ? null : Collections.min(since);
     }
 
     private List<InvoiceWorkflowEvent> eventsByActor(InvoiceStatus to, Long actorId, BusinessPeriod period) {
-        return em.createQuery("select e from InvoiceWorkflowEvent e where e.toStatus = :to and e.actorUserId = :uid "
+        return em.createQuery("select e from InvoiceWorkflowEvent e where e.toStatus = :to and e.actorUserId = :uid and (e.fromStatus is null or e.fromStatus <> e.toStatus) "
                 + "and e.createdAt >= :from order by e.id desc", InvoiceWorkflowEvent.class)
                 .setParameter("to", to).setParameter("uid", actorId).setParameter("from", period.start())
                 .setMaxResults(MAX_SUBMISSIONS_ANALYSED).getResultList();
     }
 
     private List<Map<String, Object>> reviewerWorkload() {
-        List<Object[]> rows = em.createQuery("select i.assignedReviewerId, u.displayName, i.status, count(i) "
+        List<Object[]> rows = em.createQuery("select i.assignedReviewerId, u.email, u.displayName, i.status, count(i) "
                 + "from Invoice i, AppUser u where u.id = i.assignedReviewerId "
                 + "and i.status in (com.actify.invoice.entity.InvoiceStatus.NEEDS_REVIEW, "
                 + "com.actify.invoice.entity.InvoiceStatus.PENDING_APPROVAL) "
-                + "group by i.assignedReviewerId, u.displayName, i.status order by i.assignedReviewerId", Object[].class)
+                + "group by i.assignedReviewerId, u.email, u.displayName, i.status order by i.assignedReviewerId", Object[].class)
                 .getResultList();
         Map<Long, Map<String, Object>> byReviewer = new LinkedHashMap<>();
         for (Object[] row : rows) {
             Map<String, Object> r = byReviewer.computeIfAbsent((Long) row[0], id -> {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("reviewerId", id);
-                m.put("displayName", row[1]);
+                m.put("name", UserNames.label((String) row[2], (String) row[1]));
+                m.put("displayName", UserNames.label((String) row[2], (String) row[1])); // older field name, same value
                 m.put(InvoiceStatus.NEEDS_REVIEW.name(), 0L);
                 m.put(InvoiceStatus.PENDING_APPROVAL.name(), 0L);
                 return m;
             });
-            r.put(((InvoiceStatus) row[2]).name(), row[3]);
+            r.put(((InvoiceStatus) row[3]).name(), row[4]);
         }
         Map<String, Object> unassigned = new LinkedHashMap<>();
         unassigned.put("reviewerId", null);
+        unassigned.put("name", "(not assigned)");
         unassigned.put("displayName", "(not assigned)");
         unassigned.put(InvoiceStatus.NEEDS_REVIEW.name(), count("select count(i) from Invoice i where i.ownerUserId is not null "
                 + "and i.assignedReviewerId is null and i.status = com.actify.invoice.entity.InvoiceStatus.NEEDS_REVIEW", null, null));
@@ -234,7 +239,7 @@ public class DashboardService {
     private Map<String, Object> decisions(BusinessPeriod period) {
         Map<String, Object> d = new LinkedHashMap<>();
         for (InvoiceStatus to : new InvoiceStatus[]{InvoiceStatus.PENDING_APPROVAL, InvoiceStatus.APPROVED, InvoiceStatus.REJECTED}) {
-            d.put(to.name(), em.createQuery("select count(e) from InvoiceWorkflowEvent e where e.toStatus = :to "
+            d.put(to.name(), em.createQuery("select count(e) from InvoiceWorkflowEvent e where e.toStatus = :to and (e.fromStatus is null or e.fromStatus <> e.toStatus) "
                     + "and e.createdAt >= :from", Long.class).setParameter("to", to).setParameter("from", period.start())
                     .getSingleResult());
         }
@@ -383,10 +388,24 @@ public class DashboardService {
         List<Object[]> rows = em.createQuery("select i.ownerUserId, count(a), sum(a.totalTokenCount) from GeminiCallAttempt a "
                 + "join a.invoice i where a.startedAt >= :from group by i.ownerUserId order by count(a) desc", Object[].class)
                 .setParameter("from", period.start()).getResultList();
+        List<Long> vendorIds = new ArrayList<>();
+        for (Object[] row : rows) {
+            if (row[0] != null) {
+                vendorIds.add((Long) row[0]);
+            }
+        }
+        Map<Long, String> names = new HashMap<>();
+        if (!vendorIds.isEmpty()) {
+            for (Object[] u : em.createQuery("select u.id, u.email, u.displayName from AppUser u where u.id in :ids", Object[].class)
+                    .setParameter("ids", vendorIds).getResultList()) {
+                names.put((Long) u[0], UserNames.label((String) u[2], (String) u[1]));
+            }
+        }
         List<Map<String, Object>> result = new ArrayList<>();
         for (Object[] row : rows) {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("vendorUserId", row[0]); // null = legacy single-file uploads by an admin
+            m.put("vendorName", row[0] == null ? null : names.getOrDefault(row[0], UserNames.UNKNOWN_USER));
             m.put("calls", row[1]);
             m.put("reportedTotalTokens", row[2] == null ? 0L : row[2]);
             result.add(m);

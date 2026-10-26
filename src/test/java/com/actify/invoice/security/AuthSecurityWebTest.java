@@ -45,7 +45,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * login limiter. Only the database is replaced by a Mockito repository.
  */
 @WebMvcTest(controllers = {AuthController.class, AdminUserController.class})
-@WithTask8WebSecurity
+@WithInvoiceWebSecurity
 @Import({LoginService.class, LoginAttemptLimiter.class, AppUserService.class})
 class AuthSecurityWebTest {
 
@@ -88,6 +88,32 @@ class AuthSecurityWebTest {
         // The issued cookie really works on the next request.
         mvc.perform(get("/api/auth/me").cookie(new Cookie(AuthCookies.AUTH_COOKIE, cookieValue(setCookie))))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.email").value(user.getEmail()));
+    }
+
+    /** The CSRF token is replaced on purpose at login and logout (and stays stable in between - CsrfTokenStabilityWebTest). */
+    @Test
+    void loginAndLogoutIssueAFreshCsrfToken() throws Exception {
+        AppUser user = storedUser(15, Role.VENDOR, PASSWORD);
+
+        MvcResult login = mvc.perform(login(user.getEmail(), PASSWORD).cookie(new Cookie("XSRF-TOKEN", "token-from-before-login")))
+                .andExpect(status().isOk()).andReturn();
+        String afterLogin = xsrfSetCookieValue(login);
+        assertThat(afterLogin).isNotEmpty().isNotEqualTo("token-from-before-login");
+
+        MvcResult logout = mvc.perform(post("/api/auth/logout").with(csrf()).with(address())
+                        .cookie(new Cookie("XSRF-TOKEN", afterLogin)))
+                .andExpect(status().isNoContent()).andReturn();
+        assertThat(xsrfSetCookieValue(logout)).isNotEmpty().isNotEqualTo(afterLogin);
+    }
+
+    private static String xsrfSetCookieValue(MvcResult result) {
+        String last = null;
+        for (String header : result.getResponse().getHeaders("Set-Cookie")) {
+            if (header.startsWith("XSRF-TOKEN=")) {
+                last = header.substring("XSRF-TOKEN=".length(), header.indexOf(';') < 0 ? header.length() : header.indexOf(';'));
+            }
+        }
+        return last;
     }
 
     @Test
@@ -192,6 +218,37 @@ class AuthSecurityWebTest {
         mvc.perform(get("/api/auth/me").cookie(ghost)).andExpect(status().isUnauthorized());
     }
 
+    /**
+     * After the rename to "Actify Invoice Process": a cookie under the old name is not a credential at all, and a
+     * correctly signed token that carries the old issuer or the old audience is refused (and its cookie deleted).
+     * The control request with the new identity proves the refusal comes from the issuer/audience check alone.
+     */
+    @Test
+    void legacyTask8CookieAndLegacyIssuerOrAudienceAreNoLongerAccepted() throws Exception {
+        AppUser user = TestLogins.user(26, Role.ADMIN);
+        String valid = TestLogins.cookieFor(user, users, tokenService).getValue();
+        mvc.perform(get("/api/auth/me").cookie(new Cookie("TASK8_AUTH", valid))).andExpect(status().isUnauthorized());
+
+        byte[] key = Base64.getDecoder().decode(TestLogins.TEST_SECRET);
+        String[][] legacyIdentities = {{"task8-invoice", "task8-web"}, {"task8-invoice", JwtTokenService.AUDIENCE},
+                {JwtTokenService.ISSUER, "task8-web"}};
+        for (String[] identity : legacyIdentities) {
+            String token = signRaw(JWSAlgorithm.HS256, claims(26, identity[0], identity[1]), key);
+            MvcResult result = mvc.perform(get("/api/auth/me").cookie(new Cookie(AuthCookies.AUTH_COOKIE, token)))
+                    .andExpect(status().isUnauthorized()).andReturn();
+            assertThat(authSetCookie(result)).as("cookie deleted").contains("Max-Age=0");
+        }
+
+        String current = signRaw(JWSAlgorithm.HS256, claims(26, "actify-invoice-process", "actify-invoice-process-web"), key);
+        mvc.perform(get("/api/auth/me").cookie(new Cookie(AuthCookies.AUTH_COOKIE, current))).andExpect(status().isOk());
+    }
+
+    private static String claims(long userId, String issuer, String audience) {
+        long now = Instant.now().getEpochSecond();
+        return Base64URL.encode("{\"sub\":\"" + userId + "\",\"iss\":\"" + issuer + "\",\"aud\":[\"" + audience
+                + "\"],\"tv\":0,\"iat\":" + now + ",\"exp\":" + (now + 600) + "}").toString();
+    }
+
     @Test
     void logoutDeletesTheCookieAndNeedsCsrf() throws Exception {
         mvc.perform(post("/api/auth/logout")).andExpect(status().isForbidden());
@@ -235,6 +292,17 @@ class AuthSecurityWebTest {
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.email").value("new@example.test"))
                 .andExpect(jsonPath("$.passwordHash").doesNotExist());
+
+        // Renaming (the label shown everywhere) is ADMIN-only and needs CSRF like every other write.
+        String rename = "{\"displayName\":\"Sam\"}";
+        mvc.perform(put("/api/admin/users/30/display-name").cookie(vendor).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content(rename)).andExpect(status().isForbidden());
+        mvc.perform(put("/api/admin/users/30/display-name").cookie(admin).contentType(MediaType.APPLICATION_JSON)
+                .content(rename)).andExpect(status().isForbidden()); // no CSRF token
+        mvc.perform(put("/api/admin/users/30/display-name").cookie(admin).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content(rename)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.displayName").value("Sam"))
+                .andExpect(jsonPath("$.name").value("Sam"));
     }
 
     @Test

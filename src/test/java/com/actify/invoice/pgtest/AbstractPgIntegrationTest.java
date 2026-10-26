@@ -46,7 +46,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *  - tests only INSERT their own uniquely named rows; they never delete, truncate or drop anything.
  *
  * Login: every HTTP call made with TestRestTemplate is sent as a TEST-DATABASE admin (a real app_users row
- * created once per run with a unique email), with a real signed TASK8_AUTH cookie and a CSRF header.
+ * created once per run with a unique email), with a real signed INVOICE_PROCESS_AUTH cookie and a CSRF header.
  * Use actAs(...) / actAnonymously() inside a test to call the API as another user.
  */
 @Tag("pgtest")

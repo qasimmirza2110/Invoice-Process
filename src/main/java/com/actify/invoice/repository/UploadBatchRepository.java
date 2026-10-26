@@ -10,6 +10,10 @@ import javax.persistence.LockModeType;
 import java.util.List;
 import java.util.Optional;
 
+/**
+ * Upload batches. A vendor only ever sees their own batches (BatchIntakeService filters by owner); the row lock
+ * serialises concurrent uploads into the same batch so its file limit and counters stay exact.
+ */
 public interface UploadBatchRepository extends JpaRepository<UploadBatch, Long> {
 
     /**

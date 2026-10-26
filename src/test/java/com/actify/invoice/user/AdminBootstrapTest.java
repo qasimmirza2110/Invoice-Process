@@ -20,6 +20,10 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * The one-time creation of the first ADMIN from INVOICE_BOOTSTRAP_ADMIN_EMAIL/PASSWORD: created once, skipped when an
+ * admin already exists or nothing is configured, and the password never appears in the log.
+ */
 class AdminBootstrapTest {
 
     private static final String PASSWORD = "bootstrap-password-for-tests";

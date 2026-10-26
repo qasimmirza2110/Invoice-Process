@@ -1,0 +1,57 @@
+HELP.md
+target/
+.mvn/wrapper/maven-wrapper.jar
+
+# Secrets - never commit real keys, passwords or certificates
+.env
+*.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.jks
+credentials.json
+*credentials*.json
+secrets.properties
+*-secrets.properties
+application-local.properties
+application-*-local.properties
+
+# Database dumps and logs (SQL scripts in docs/sql ARE committed: no *.sql rule on purpose)
+*.dump
+*.backup
+*.bak
+*.dump.gz
+*.sql.gz
+*.sql.zip
+*.log
+
+# Local invoice documents and test files - kept on this computer only
+samples/
+postman/fixtures/
+cloudFiles/
+# Screenshots and exported pages of the retired UI - personal/local material, never published
+# Any PDF (real invoices must never enter Git; test fixtures are generated or kept local)
+*.pdf
+/*.png
+/*.jpg
+/*.jpeg
+docs/image/
+
+# Local working notes
+*Runbook*.html
+/*.html
+
+### IDE ###
+.idea
+*.iws
+*.iml
+*.ipr
+.classpath
+.factorypath
+.project
+.settings
+.metadata
+*.launch
+.vscode/

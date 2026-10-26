@@ -150,6 +150,24 @@ class QuotaPgIntegrationTest extends AbstractQueuePgTest {
         assertThat(reserve(rpd, invoice)).contains("Daily Gemini quota");
     }
 
+    /** Even pacing: with 2 calls a minute allowed, the second call must wait ~30 s after the first, not fire at once. */
+    @Test
+    void callsAreSpacedEvenlyInsteadOfFiredInABurst() {
+        Invoice invoice = transactionTemplate.execute(s -> {
+            Invoice i = new Invoice();
+            i.setStatus(InvoiceStatus.FAILED);
+            i.setFailureReason("synthetic pacing test row");
+            return invoiceRepository.save(i);
+        });
+        String model = "pgtest-pacing-" + UUID.randomUUID().toString().substring(0, 8);
+        GeminiQuotaGuard paced = new GeminiQuotaGuard(new QuotaSettings("2", "1000000", "1000", "100", 1.0, "15", true), attempts,
+                new GeminiConfig("not-used", model, "http://127.0.0.1:9"), Clock.systemDefaultZone());
+        ReflectionTestUtils.setField(paced, "entityManager", entityManager);
+
+        assertThat(reserve(paced, invoice)).isNull();
+        assertThat(reserve(paced, invoice)).contains("Pacing calls evenly");
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private void makeEligibleNow(long invoiceId) {
@@ -159,7 +177,9 @@ class QuotaPgIntegrationTest extends AbstractQueuePgTest {
 
     private GeminiQuotaGuard smallGuard(String rpm, String tpm, String rpd, String estimate) {
         String model = "pgtest-small-guard-" + UUID.randomUUID().toString().substring(0, 8);
-        GeminiQuotaGuard guard = new GeminiQuotaGuard(new QuotaSettings(rpm, tpm, rpd, estimate, 1.0), attempts,
+        // Budget tests only: no business cap and no even pacing, so back-to-back reservations reach the budget rule.
+        GeminiQuotaGuard guard = new GeminiQuotaGuard(new QuotaSettings(rpm, tpm, rpd, estimate, 1.0,
+                String.valueOf(Integer.MAX_VALUE), false), attempts,
                 new GeminiConfig("not-used", model, "http://127.0.0.1:9"), Clock.systemDefaultZone());
         ReflectionTestUtils.setField(guard, "entityManager", entityManager);
         return guard;

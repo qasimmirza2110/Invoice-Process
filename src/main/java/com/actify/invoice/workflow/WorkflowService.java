@@ -52,6 +52,15 @@ public class WorkflowService {
         eventRepository.save(new InvoiceWorkflowEvent(invoice, from, to, actor(actorUserId), version, reason));
     }
 
+    /**
+     * Audit row for an assignment change. The status does not change, so from_status = to_status = the current status
+     * (no new column needed). Status-based metrics ignore such rows (see DashboardService: "fromStatus <> toStatus").
+     */
+    public void recordAssignment(Invoice invoice, Long actorUserId, String reason) {
+        eventRepository.save(new InvoiceWorkflowEvent(invoice, invoice.getStatus(), invoice.getStatus(), actor(actorUserId),
+                null, reason));
+    }
+
     // A reference (no SELECT): only the id is needed for the foreign key.
     private AppUser actor(Long actorUserId) {
         return actorUserId == null ? null : entityManager.getReference(AppUser.class, actorUserId);

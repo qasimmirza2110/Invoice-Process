@@ -10,6 +10,7 @@ import com.actify.invoice.entity.InvoiceStatus;
 import com.actify.invoice.repository.ExtractionJobRepository;
 import com.actify.invoice.repository.InvoiceRepository;
 import com.actify.invoice.repository.InvoiceReviewReasonRepository;
+import com.actify.invoice.review.DuplicateInvoiceFinder;
 import com.actify.invoice.validation.InvoiceExtractionValidator;
 import com.actify.invoice.validation.ReviewReason;
 import com.actify.invoice.validation.ReviewReasonCode;
@@ -43,16 +44,19 @@ public class ExtractionOutcomeService {
     private final InvoiceExtractionValidator validator;
     private final InvoiceVersionWriter versionWriter;
     private final WorkflowService workflow;
+    private final DuplicateInvoiceFinder duplicates;
 
     public ExtractionOutcomeService(InvoiceRepository invoiceRepository, ExtractionJobRepository jobRepository,
                                     InvoiceReviewReasonRepository reasonRepository, InvoiceExtractionValidator validator,
-                                    InvoiceVersionWriter versionWriter, WorkflowService workflow) {
+                                    InvoiceVersionWriter versionWriter, WorkflowService workflow,
+                                    DuplicateInvoiceFinder duplicates) {
         this.invoiceRepository = invoiceRepository;
         this.jobRepository = jobRepository;
         this.reasonRepository = reasonRepository;
         this.validator = validator;
         this.versionWriter = versionWriter;
         this.workflow = workflow;
+        this.duplicates = duplicates;
     }
 
     /** @return the review reasons that were stored (empty = every automatic check passed) */
@@ -141,17 +145,22 @@ public class ExtractionOutcomeService {
         return invoice;
     }
 
+    /** Both checks compare ONLY with the same vendor's own invoices (see DuplicateInvoiceFinder). */
     private void addDuplicateReasons(Invoice invoice, List<ReviewReason> reasons) {
-        if (invoice.getSourceDocument() != null
-                && invoiceRepository.countOtherInvoicesWithSha256(invoice.getId(), invoice.getSourceDocument().getSha256()) > 0) {
-            reasons.add(new ReviewReason(ReviewReasonCode.DUPLICATE_FILE, null,
-                    "The same PDF file was already uploaded for another invoice"));
+        if (invoice.getOwnerUserId() == null) {
+            return; // legacy single-file invoice: no vendor scope
         }
-        if (invoice.getSellerName() != null && invoice.getInvoiceNumber() != null
-                && invoiceRepository.countOtherInvoicesWithSellerAndNumber(invoice.getId(), invoice.getSellerName(),
-                invoice.getInvoiceNumber()) > 0) {
+        // Normally impossible (intake rejects the same vendor's same bytes) - kept as a safety net.
+        if (invoice.getSourceDocument() != null && invoiceRepository.countOtherOwnInvoicesWithSha256(
+                invoice.getOwnerUserId(), invoice.getId(), invoice.getSourceDocument().getSha256()) > 0) {
+            reasons.add(new ReviewReason(ReviewReasonCode.DUPLICATE_FILE, null,
+                    "You already uploaded this exact PDF file for another invoice."));
+        }
+        Invoice earlier = duplicates.findSameVendorDuplicate(invoice, invoice.getInvoiceNumber(), invoice.getSellerTaxId(),
+                invoice.getSellerName());
+        if (earlier != null) {
             reasons.add(new ReviewReason(ReviewReasonCode.DUPLICATE_INVOICE_NO, "invoiceNumber",
-                    "Another invoice from the same seller has invoice number " + invoice.getInvoiceNumber()));
+                    DuplicateInvoiceFinder.describe(earlier)));
         }
     }
 

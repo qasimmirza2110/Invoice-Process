@@ -121,12 +121,76 @@ class GeminiInvoiceExtractorTest {
     }
 
     @Test
+    void theProvidersRetryHintIsReadFromTheRetryAfterHeader() {
+        org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+        headers.set(org.springframework.http.HttpHeaders.RETRY_AFTER, "42");
+        server.expect(requestTo(URL)).andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE).headers(headers));
+        assertThatThrownBy(() -> extractor.extract(PDF)).isInstanceOfSatisfying(InvoiceExtractionException.class,
+                e -> assertThat(e.getRetryAfterSeconds()).isEqualTo(42L));
+    }
+
+    @Test
+    void theProvidersRetryHintIsReadFromRetryInfoAndRoundedUp() {
+        server.expect(requestTo(URL)).andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS).contentType(MediaType.APPLICATION_JSON)
+                .body("{\"error\":{\"code\":429,\"status\":\"RESOURCE_EXHAUSTED\",\"details\":["
+                        + "{\"@type\":\"type.googleapis.com/google.rpc.QuotaFailure\",\"violations\":[{\"quotaId\":\"GenerateRequestsPerMinutePerProjectPerModel-FreeTier\"}]},"
+                        + "{\"@type\":\"type.googleapis.com/google.rpc.RetryInfo\",\"retryDelay\":\"36.4s\"}]}}"));
+        assertThatThrownBy(() -> extractor.extract(PDF)).isInstanceOfSatisfying(InvoiceExtractionException.class, e -> {
+            assertThat(e.getRetryAfterSeconds()).isEqualTo(37L);
+            // a per-MINUTE 429 is retried (not the daily wait)
+            assertThat(com.actify.invoice.quota.FailureClassifier.classify(e))
+                    .isEqualTo(com.actify.invoice.quota.FailureClassifier.Decision.RETRY);
+        });
+    }
+
+    @Test
+    void noRetryHintMeansNullNotAGuess() {
+        server.expect(requestTo(URL)).andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS).body("not json"));
+        assertThatThrownBy(() -> extractor.extract(PDF)).isInstanceOfSatisfying(InvoiceExtractionException.class,
+                e -> assertThat(e.getRetryAfterSeconds()).isNull());
+    }
+
+    @Test
+    void permanentProviderErrorsAreNeverRetried() {
+        for (HttpStatus status : new HttpStatus[]{HttpStatus.BAD_REQUEST, HttpStatus.UNAUTHORIZED, HttpStatus.FORBIDDEN, HttpStatus.NOT_FOUND}) {
+            server.reset();
+            server.expect(requestTo(URL)).andRespond(withStatus(status));
+            assertThatThrownBy(() -> extractor.extract(PDF)).as(status.toString()).isInstanceOfSatisfying(InvoiceExtractionException.class,
+                    e -> assertThat(com.actify.invoice.quota.FailureClassifier.classify(e))
+                            .isEqualTo(com.actify.invoice.quota.FailureClassifier.Decision.FAIL));
+        }
+    }
+
+    @Test
     void networkErrorsAndUnusableAnswersAreClassifiedForTheRetryDecision() {
         server.expect(requestTo(URL)).andRespond(request -> {
             throw new java.net.SocketTimeoutException("Read timed out");
         });
         assertThatThrownBy(() -> extractor.extract(PDF)).isInstanceOfSatisfying(InvoiceExtractionException.class,
                 e -> org.assertj.core.api.Assertions.assertThat(e.getKind()).isEqualTo(InvoiceExtractionException.Kind.NETWORK));
+    }
+
+    @Test
+    void aSafetyBlockedPromptIsReportedWithItsBlockReasonAndNeverAsData() {
+        server.expect(requestTo(URL)).andRespond(withSuccess(
+                "{\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"usageMetadata\":{\"promptTokenCount\":812}}",
+                MediaType.APPLICATION_JSON));
+        assertThatThrownBy(() -> extractor.extract(PDF)).isInstanceOfSatisfying(InvoiceExtractionException.class, e -> {
+            assertThat(e.getKind()).isEqualTo(InvoiceExtractionException.Kind.BLOCKED);
+            assertThat(e.getMessage()).contains("block reason: SAFETY");
+            assertThat(e.getTokenUsage().getPromptTokenCount()).isEqualTo(812L); // reported, not invented
+        });
+    }
+
+    @Test
+    void aTruncatedEmptyAnswerNamesTheFinishReason() {
+        server.expect(requestTo(URL)).andRespond(withSuccess(
+                "{\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"MAX_TOKENS\"}]}", MediaType.APPLICATION_JSON));
+        assertThatThrownBy(() -> extractor.extract(PDF)).isInstanceOfSatisfying(InvoiceExtractionException.class, e -> {
+            assertThat(e.getKind()).isEqualTo(InvoiceExtractionException.Kind.INVALID_RESPONSE);
+            assertThat(e.getMessage()).contains("finish reason: MAX_TOKENS");
+            assertThat(e.getTokenUsage().getTotalTokenCount()).isNull(); // absent metadata stays absent
+        });
     }
 
     @Test

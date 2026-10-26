@@ -29,7 +29,7 @@ import java.util.Arrays;
  */
 public class PgTestDatabaseGuard implements BeanPostProcessor, EnvironmentAware, PriorityOrdered {
 
-    public static final String TEST_DATABASE = "Actify-Internship-Task-8-Invoice-LLM-Extraction_test_db";
+    public static final String TEST_DATABASE = "Actify-Internship-Invoice-Process_test_db";
     public static final String REQUIRED_PROFILE = "pgtest";
 
     private Environment environment;

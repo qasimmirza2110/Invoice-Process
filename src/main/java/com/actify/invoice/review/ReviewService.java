@@ -21,8 +21,11 @@ import com.actify.invoice.repository.InvoiceReviewReasonRepository;
 import com.actify.invoice.repository.InvoiceWorkflowEventRepository;
 import com.actify.invoice.security.AuthenticatedUser;
 import com.actify.invoice.security.CurrentUserService;
+import com.actify.invoice.user.Role;
+import com.actify.invoice.user.UserNames;
 import com.actify.invoice.validation.InvoiceExtractionValidator;
 import com.actify.invoice.validation.ReviewReason;
+import com.actify.invoice.validation.ReviewReasonCode;
 import com.actify.invoice.versioning.InvoiceVersionWriter;
 import com.actify.invoice.workflow.WorkflowService;
 import org.springframework.security.access.AccessDeniedException;
@@ -32,6 +35,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The reviewer's side of the workflow (all callers have passed InvoiceAccessPolicy first):
@@ -49,10 +53,13 @@ public class ReviewService {
     private final InvoiceVersionWriter versionWriter;
     private final WorkflowService workflow;
     private final CurrentUserService currentUser;
+    private final UserNames userNames;
+    private final DuplicateInvoiceFinder duplicates;
 
     public ReviewService(InvoiceRepository invoiceRepository, InvoiceReviewReasonRepository reasonRepository,
                          InvoiceWorkflowEventRepository eventRepository, InvoiceExtractionValidator validator,
-                         InvoiceVersionWriter versionWriter, WorkflowService workflow, CurrentUserService currentUser) {
+                         InvoiceVersionWriter versionWriter, WorkflowService workflow, CurrentUserService currentUser,
+                         UserNames userNames, DuplicateInvoiceFinder duplicates) {
         this.invoiceRepository = invoiceRepository;
         this.reasonRepository = reasonRepository;
         this.eventRepository = eventRepository;
@@ -60,12 +67,20 @@ public class ReviewService {
         this.versionWriter = versionWriter;
         this.workflow = workflow;
         this.currentUser = currentUser;
+        this.userNames = userNames;
+        this.duplicates = duplicates;
     }
 
     @Transactional(readOnly = true)
     public List<ReviewReasonResponse> reviewReasons(Long invoiceId) {
+        boolean vendor = currentUser.require().getRole() == Role.VENDOR;
         List<ReviewReasonResponse> result = new ArrayList<>();
         for (InvoiceReviewReason reason : reasonRepository.findByInvoiceId(invoiceId)) {
+            // Every reason is about this vendor's own data (duplicates are vendor-scoped); the filter stays the one
+            // place to narrow it if a cross-vendor reason is ever introduced.
+            if (vendor && !ReviewReasonCode.visibleToVendor().contains(reason.getCode())) {
+                continue;
+            }
             result.add(new ReviewReasonResponse(reason));
         }
         return result;
@@ -80,9 +95,15 @@ public class ReviewService {
 
     @Transactional(readOnly = true)
     public List<EventResponse> events(Long invoiceId) {
+        List<InvoiceWorkflowEvent> events = eventRepository.findByInvoiceIdOrderByIdAsc(invoiceId);
+        List<Long> actorIds = new ArrayList<>();
+        for (InvoiceWorkflowEvent event : events) {
+            actorIds.add(event.getActorUserId());
+        }
+        Map<Long, String> names = userNames.namesById(actorIds);
         List<EventResponse> result = new ArrayList<>();
-        for (InvoiceWorkflowEvent event : eventRepository.findByInvoiceIdOrderByIdAsc(invoiceId)) {
-            result.add(new EventResponse(event));
+        for (InvoiceWorkflowEvent event : events) {
+            result.add(new EventResponse(event, UserNames.nameOrUnknown(names, event.getActorUserId())));
         }
         return result;
     }
@@ -116,6 +137,15 @@ public class ReviewService {
         if (!problems.isEmpty()) {
             throw new InvoiceValidationException("The current version still fails automatic checks; correct it before submitting.",
                     problems);
+        }
+        // A duplicate of the same vendor's earlier invoice may not go to approval (checked on the CURRENT, possibly
+        // corrected, values). The admin can reject it instead.
+        Invoice earlier = duplicates.findSameVendorDuplicate(invoice, invoice.getInvoiceNumber(), invoice.getSellerTaxId(),
+                invoice.getSellerName());
+        if (earlier != null) {
+            throw new InvoiceValidationException("This is a duplicate: " + DuplicateInvoiceFinder.describe(earlier)
+                    + " Correct the invoice number if it was misread, or ask an admin to reject this upload.",
+                    Collections.singletonList(new FieldErrorDto("invoiceNumber", "Duplicate of invoice " + earlier.getId())));
         }
         invoice.setSubmittedVersion(version);
         workflow.transition(invoice, InvoiceStatus.PENDING_APPROVAL, user.getId(), version, "Submitted for approval");

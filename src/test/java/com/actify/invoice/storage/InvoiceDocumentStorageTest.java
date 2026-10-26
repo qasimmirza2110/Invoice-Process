@@ -13,6 +13,11 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * Private PDF storage on a temporary folder: exact bytes under a generated UUID name, SHA-256 recorded and re-checked
+ * on read (tampering is detected), no overwrite of existing files, and no path other than a canonical UUID can be
+ * resolved (path traversal protection).
+ */
 class InvoiceDocumentStorageTest {
 
     @TempDir

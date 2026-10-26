@@ -22,5 +22,5 @@ import java.lang.annotation.Target;
 @Import({SecurityConfig.class, JwtTokenService.class, AuthCookies.class, CurrentUserService.class,
         InvoiceAccessPolicy.class})
 @TestPropertySource(properties = "invoice.jwt.secret=" + TestLogins.TEST_SECRET)
-public @interface WithTask8WebSecurity {
+public @interface WithInvoiceWebSecurity {
 }

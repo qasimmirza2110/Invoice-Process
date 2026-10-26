@@ -9,6 +9,11 @@ import org.springframework.data.repository.query.Param;
 import java.time.LocalDateTime;
 import java.util.List;
 
+/**
+ * The ledger of every Gemini call this application started (one GeminiCallAttempt row per call, whatever its
+ * outcome). GeminiQuotaGuard counts these rows to stay inside the per-minute and per-day limits, and the dashboards
+ * report token usage from them. All quota queries are per model, because Google counts limits per project and model.
+ */
 public interface GeminiCallAttemptRepository extends JpaRepository<GeminiCallAttempt, Long> {
 
     /**
@@ -17,6 +22,10 @@ public interface GeminiCallAttemptRepository extends JpaRepository<GeminiCallAtt
      */
     @Query("select count(a) from GeminiCallAttempt a where a.modelId = :modelId and a.startedAt >= :since")
     long countStartedSince(@Param("modelId") String modelId, @Param("since") LocalDateTime since);
+
+    /** When the most recent call for this model started (any outcome), or null. Used for even pacing. */
+    @Query("select max(a.startedAt) from GeminiCallAttempt a where a.modelId = :modelId")
+    LocalDateTime lastStartedAt(@Param("modelId") String modelId);
 
     /** Input tokens used since the given time: Gemini's reported count where known, otherwise our estimate. */
     @Query("select coalesce(sum(coalesce(a.promptTokenCount, a.estimatedInputTokens)), 0) "

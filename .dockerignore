@@ -1,0 +1,19 @@
+# Only pom.xml and src/ are needed by the Dockerfile. Everything else stays out of the build context, above all
+# secrets, local configuration, invoice documents and build output.
+*
+!pom.xml
+!src/
+# Belt and braces inside src/: never ship local secrets or documents even if one is placed there by mistake.
+**/.env
+**/.env.*
+**/*.launch
+**/*.pdf
+**/*.pem
+**/*.key
+**/*.p12
+**/*.jks
+**/credentials*.json
+**/secrets.properties
+**/*-local.properties
+**/*.dump
+**/*.backup

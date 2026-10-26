@@ -22,6 +22,11 @@ public final class BatchDtos {
     public static class CreateBatchRequest {
         private String label;
         private String defaultCategoryCode;
+        /** LOCAL (default when missing), GOOGLE_DRIVE or ONEDRIVE. A cloud source must be configured. */
+        private String source;
+
+        public String getSource() { return source; }
+        public void setSource(String source) { this.source = source; }
 
         public String getLabel() { return label; }
         public void setLabel(String label) { this.label = label; }

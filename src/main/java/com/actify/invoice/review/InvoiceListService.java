@@ -7,6 +7,9 @@ import com.actify.invoice.repository.InvoiceRepository;
 import com.actify.invoice.repository.ReviewReasonCounts;
 import com.actify.invoice.security.AuthenticatedUser;
 import com.actify.invoice.security.CurrentUserService;
+import com.actify.invoice.user.Role;
+import com.actify.invoice.user.UserNames;
+import com.actify.invoice.validation.ReviewReasonCode;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -16,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import javax.persistence.criteria.Predicate;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -33,12 +37,14 @@ public class InvoiceListService {
     private final InvoiceRepository invoiceRepository;
     private final ReviewReasonCounts reasonCounts;
     private final CurrentUserService currentUser;
+    private final UserNames userNames;
 
     public InvoiceListService(InvoiceRepository invoiceRepository, ReviewReasonCounts reasonCounts,
-                              CurrentUserService currentUser) {
+                              CurrentUserService currentUser, UserNames userNames) {
         this.invoiceRepository = invoiceRepository;
         this.reasonCounts = reasonCounts;
         this.currentUser = currentUser;
+        this.userNames = userNames;
     }
 
     @Transactional(readOnly = true)
@@ -79,10 +85,24 @@ public class InvoiceListService {
         for (Invoice invoice : result.getContent()) {
             ids.add(invoice.getId());
         }
-        Map<Long, Long> counts = reasonCounts.forInvoices(ids);
+        // A vendor's count leaves out cross-invoice duplicate reasons (they would reveal other vendors' uploads).
+        Map<Long, Long> counts = reasonCounts.forInvoices(ids,
+                user.getRole() == Role.VENDOR ? ReviewReasonCode.visibleToVendor() : null);
+        // Reviewer names for ADMIN / REVIEWER lists (one query); vendors do not get the reviewer's identity.
+        Map<Long, String> names = Collections.emptyMap();
+        if (user.getRole() != Role.VENDOR) {
+            List<Long> reviewerIds = new ArrayList<>();
+            for (Invoice invoice : result.getContent()) {
+                reviewerIds.add(invoice.getAssignedReviewerId());
+            }
+            names = userNames.namesById(reviewerIds);
+        }
         List<InvoiceSummary> rows = new ArrayList<>();
         for (Invoice invoice : result.getContent()) {
-            rows.add(new InvoiceSummary(invoice, counts.getOrDefault(invoice.getId(), 0L)));
+            Long reviewerId = invoice.getAssignedReviewerId();
+            String reviewerName = user.getRole() == Role.VENDOR || reviewerId == null ? null
+                    : names.getOrDefault(reviewerId, UserNames.UNKNOWN_USER);
+            rows.add(new InvoiceSummary(invoice, counts.getOrDefault(invoice.getId(), 0L), reviewerName));
         }
         return rows;
     }

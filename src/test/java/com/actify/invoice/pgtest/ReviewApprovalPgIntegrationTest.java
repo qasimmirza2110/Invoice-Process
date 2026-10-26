@@ -130,6 +130,7 @@ class ReviewApprovalPgIntegrationTest extends AbstractQueuePgTest {
                 "null->QUEUED by user:" + vendor.getId(),
                 "QUEUED->PROCESSING by system",
                 "PROCESSING->NEEDS_REVIEW by system",
+                "NEEDS_REVIEW->NEEDS_REVIEW by user:" + testAdmin().getId(), // assignment audit row
                 "NEEDS_REVIEW->PENDING_APPROVAL by user:" + reviewer.getId(),
                 "PENDING_APPROVAL->APPROVED by user:" + testAdmin().getId(),
                 "APPROVED->NEEDS_REVIEW by user:" + testAdmin().getId(),

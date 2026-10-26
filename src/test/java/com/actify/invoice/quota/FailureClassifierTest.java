@@ -7,6 +7,10 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Which Gemini failures are retried (transient HTTP and network errors) and which never are (client errors,
+ * unusable answers), that a daily-quota 429 waits for the daily reset, and that stored error codes stay short and safe.
+ */
 class FailureClassifierTest {
 
     @Test

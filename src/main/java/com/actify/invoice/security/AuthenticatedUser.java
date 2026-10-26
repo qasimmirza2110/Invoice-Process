@@ -28,6 +28,8 @@ public final class AuthenticatedUser {
     public Long getId() { return id; }
     public String getEmail() { return email; }
     public String getDisplayName() { return displayName; }
+    /** Shown in the UI: the e-mail before the "@" (see UserNames). */
+    public String getName() { return com.actify.invoice.user.UserNames.label(displayName, email); }
     public Role getRole() { return role; }
 
     public boolean isAdmin() {

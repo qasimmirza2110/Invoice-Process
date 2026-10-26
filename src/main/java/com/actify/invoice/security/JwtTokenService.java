@@ -2,6 +2,9 @@ package com.actify.invoice.security;
 
 import com.actify.invoice.user.AppUser;
 import com.nimbusds.jose.jwk.source.ImmutableSecret;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
 import org.springframework.security.oauth2.core.OAuth2TokenValidator;
@@ -20,6 +23,7 @@ import org.springframework.util.StringUtils;
 
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
@@ -34,22 +38,48 @@ import java.util.UUID;
  *
  * Token contents: iss, aud, sub (user id), tv (token version), iat, exp, jti. The role is NOT in the token:
  * it is read from app_users on every request, so a role change takes effect immediately.
+ *
+ * Issuer and audience name this application ("Actify Invoice Process"). Encoding and decoding share the same two
+ * constants, so a token is only accepted when both values match exactly. Tokens issued under the earlier project
+ * identity (issuer "task8-invoice", audience "task8-web") fail this check: after the rename every user logs in once
+ * more. That is intended - an old token never keeps working just because it is still signed with the same key.
  */
 @Component
 public class JwtTokenService {
 
-    public static final String ISSUER = "task8-invoice";
-    public static final String AUDIENCE = "task8-web";
+    public static final String ISSUER = "actify-invoice-process";
+    public static final String AUDIENCE = "actify-invoice-process-web";
     public static final String TOKEN_VERSION_CLAIM = "tv";
     static final int MIN_SECRET_BYTES = 32;
+    private static final Logger log = LoggerFactory.getLogger(JwtTokenService.class);
 
     private final NimbusJwtEncoder encoder;
     private final NimbusJwtDecoder decoder;
     private final Duration lifetime;
 
+    public JwtTokenService(String base64Secret, long lifetimeMinutes) {
+        this(base64Secret, lifetimeMinutes, false);
+    }
+
+    /**
+     * @param allowEphemeralSecret true only in the localdemo profile (invoice.jwt.allow-ephemeral-secret): when no
+     *                             INVOICE_JWT_SECRET is configured, a random key is made for this run only, so a plain
+     *                             "Run As > Java Application" in Eclipse works. Logins then end when the app stops.
+     */
+    @Autowired
     public JwtTokenService(@Value("${invoice.jwt.secret:}") String base64Secret,
-                           @Value("${invoice.jwt.ttl-minutes:30}") long lifetimeMinutes) {
-        SecretKey key = new SecretKeySpec(decodeSecret(base64Secret), "HmacSHA256");
+                           @Value("${invoice.jwt.ttl-minutes:30}") long lifetimeMinutes,
+                           @Value("${invoice.jwt.allow-ephemeral-secret:false}") boolean allowEphemeralSecret) {
+        byte[] secret;
+        if (!StringUtils.hasText(base64Secret) && allowEphemeralSecret) {
+            secret = new byte[MIN_SECRET_BYTES];
+            new SecureRandom().nextBytes(secret);
+            log.warn("INVOICE_JWT_SECRET is not set: using a random signing key for this run only (local demo). "
+                    + "Everyone has to log in again after a restart.");
+        } else {
+            secret = decodeSecret(base64Secret);
+        }
+        SecretKey key = new SecretKeySpec(secret, "HmacSHA256");
         this.encoder = new NimbusJwtEncoder(new ImmutableSecret<>(key));
         this.decoder = NimbusJwtDecoder.withSecretKey(key).macAlgorithm(MacAlgorithm.HS256).build();
         OAuth2TokenValidator<Jwt> audience = new JwtClaimValidator<List<String>>("aud",
@@ -79,6 +109,11 @@ public class JwtTokenService {
         return bytes;
     }
 
+    /**
+     * Signs a new login token for this user, valid for {@link #getLifetime()} from now. The token carries the user's
+     * current token version ("tv"), so raising that version in the database (role change, disable, "log out
+     * everywhere") makes every earlier token useless on its next request.
+     */
     public String issue(AppUser user) {
         return issue(user, Instant.now());
     }

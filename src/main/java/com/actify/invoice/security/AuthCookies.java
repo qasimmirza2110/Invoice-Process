@@ -11,15 +11,20 @@ import javax.servlet.http.HttpServletResponse;
 import java.time.Duration;
 
 /**
- * The login cookie "TASK8_AUTH".
+ * The login cookie "INVOICE_PROCESS_AUTH" - the only place its name and attributes are defined.
  *  - HttpOnly: JavaScript can never read the token, so an XSS bug cannot steal it.
  *  - SameSite=Strict: the browser does not send it on requests started from another site.
  *  - Secure: always on HTTPS requests; on the plain-HTTP local demo only when INVOICE_COOKIE_SECURE=true.
+ *
+ * Only this exact name is ever read. A cookie left over from the earlier project identity ("TASK8_AUTH") is simply
+ * ignored, and its token would fail the issuer/audience check anyway (JwtTokenService); it expires in the browser on
+ * its own after at most one token lifetime. This cookie is unrelated to the CSRF pair (XSRF-TOKEN cookie +
+ * X-XSRF-TOKEN header), which Spring Security manages separately.
  */
 @Component
 public class AuthCookies {
 
-    public static final String AUTH_COOKIE = "TASK8_AUTH";
+    public static final String AUTH_COOKIE = "INVOICE_PROCESS_AUTH";
 
     private final boolean forceSecure;
 

@@ -1,8 +1,11 @@
 package com.actify.invoice.service;
 
+import com.actify.invoice.entity.Invoice;
 import com.actify.invoice.entity.InvoiceDocument;
 import com.actify.invoice.exception.DocumentNotFoundException;
+import com.actify.invoice.exception.InvoiceNotFoundException;
 import com.actify.invoice.repository.InvoiceDocumentRepository;
+import com.actify.invoice.repository.InvoiceRepository;
 import com.actify.invoice.storage.InvoiceDocumentStorage;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,10 +16,27 @@ public class InvoiceDocumentService {
 
     private final InvoiceDocumentRepository documentRepository;
     private final InvoiceDocumentStorage documentStorage;
+    private final InvoiceRepository invoiceRepository;
 
-    public InvoiceDocumentService(InvoiceDocumentRepository documentRepository, InvoiceDocumentStorage documentStorage) {
+    public InvoiceDocumentService(InvoiceDocumentRepository documentRepository, InvoiceDocumentStorage documentStorage,
+                                  InvoiceRepository invoiceRepository) {
         this.documentRepository = documentRepository;
         this.documentStorage = documentStorage;
+        this.invoiceRepository = invoiceRepository;
+    }
+
+    /**
+     * The original PDF of THIS invoice (invoices.source_document_id). The same file backs every version of the invoice:
+     * corrections change invoice_versions, never the stored PDF. 404 when the invoice has no stored original
+     * (old legacy rows) - the caller has already checked read access to the invoice.
+     */
+    @Transactional(readOnly = true)
+    public DocumentContent loadForInvoice(Long invoiceId) {
+        Invoice invoice = invoiceRepository.findById(invoiceId).orElseThrow(() -> new InvoiceNotFoundException(invoiceId));
+        if (invoice.getSourceDocument() == null) {
+            throw new DocumentNotFoundException();
+        }
+        return load(invoice.getSourceDocument().getId());
     }
 
     @Transactional(readOnly = true)

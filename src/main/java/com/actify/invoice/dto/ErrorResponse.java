@@ -16,6 +16,9 @@ public class ErrorResponse {
     // Only for errors about specific input fields (the invoice edit form). Omitted from the JSON
     // otherwise, so every existing error response keeps exactly its previous shape.
     private final List<FieldErrorDto> fieldErrors;
+    // Only on unexpected 500s: a short random reference that is also written to the server log line, so a user can
+    // report it and a developer can find the stack trace. It carries no internal detail.
+    private String errorId;
 
     public ErrorResponse(int status, String error, String message, String path) {
         this(status, error, message, path, null);
@@ -38,4 +41,12 @@ public class ErrorResponse {
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public List<FieldErrorDto> getFieldErrors() { return fieldErrors; }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public String getErrorId() { return errorId; }
+
+    public ErrorResponse withErrorId(String errorId) {
+        this.errorId = errorId;
+        return this;
+    }
 }

@@ -19,7 +19,10 @@ import java.util.Map;
  *  - The state lives in this JVM's memory: a restart resets it, and a second app instance would not share it.
  *  - The app is bound to 127.0.0.1, so in the local demo every browser has the SAME client address. Five failed
  *    logins from any accounts therefore lock all logins for 15 minutes (or until a restart).
- *  - The address is request.getRemoteAddr(). X-Forwarded-For is ignored, because there is no trusted proxy.
+ *  - The address is request.getRemoteAddr(); this class never reads X-Forwarded-For. Locally there is no proxy. In the
+ *    render profile (server.forward-headers-strategy=native) Tomcat substitutes the client address only when the
+ *    request comes from an internal proxy; whether Render's proxy qualifies must be verified after deployment
+ *    (docs/RENDER_DEPLOYMENT.md, section 9) - otherwise all clients share one address and one lock.
  */
 @Component
 public class LoginAttemptLimiter {
