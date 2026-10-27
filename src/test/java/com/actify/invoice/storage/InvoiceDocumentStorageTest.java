@@ -8,15 +8,19 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Private PDF storage on a temporary folder: exact bytes under a generated UUID name, SHA-256 recorded and re-checked
- * on read (tampering is detected), no overwrite of existing files, and no path other than a canonical UUID can be
- * resolved (path traversal protection).
+ * on read (tampering is detected), no overwrite of existing files, no temporary file left behind, and no path other
+ * than a canonical UUID can be resolved (path traversal protection). A temporary folder proves the code, not that a
+ * hosted disk is persistent or writable - that is the post-deploy check in docs/RENDER_DEPLOYMENT.md.
  */
 class InvoiceDocumentStorageTest {
 
@@ -90,6 +94,53 @@ class InvoiceDocumentStorageTest {
         }
         String ok = UUID.randomUUID().toString();
         assertThat(storage.resolve(ok).getParent()).isEqualTo(dir.normalize());
+    }
+
+    @Test
+    void aStoredDocumentLeavesOnlyItsFinalFileNoTemporaryFile() throws Exception {
+        InvoiceDocumentStorage storage = new InvoiceDocumentStorage(dir.toString());
+        StoredDocument a = storage.store(pdf);
+        StoredDocument b = storage.store(pdf);
+
+        assertThat(fileNames(dir)).containsExactlyInAnyOrder(a.getId() + ".pdf", b.getId() + ".pdf");
+    }
+
+    @Test
+    void anUnusableStorageFolderFailsCleanlyWithoutAPathInTheMessageAndLeavesNothingBehind() throws Exception {
+        Path notAFolder = Files.write(dir.resolve("plain-file"), new byte[]{1});
+        InvoiceDocumentStorage storage = new InvoiceDocumentStorage(notAFolder.toString());
+
+        assertThatThrownBy(() -> storage.store(pdf))
+                .isInstanceOf(DocumentStorageException.class)
+                .hasMessage("Could not store the original PDF")
+                .hasMessageNotContaining(dir.toString());
+        assertThat(fileNames(dir)).containsExactly("plain-file");
+        assertThat(Files.readAllBytes(notAFolder)).containsExactly(1);
+    }
+
+    @Test
+    void verifyWritableCreatesTheFolderProbesItAndLeavesItEmpty() throws Exception {
+        Path folder = dir.resolve("mount").resolve("invoice-documents");
+        new InvoiceDocumentStorage(folder.toString()).verifyWritable();
+
+        assertThat(Files.isDirectory(folder)).isTrue();
+        assertThat(fileNames(folder)).isEmpty();
+    }
+
+    @Test
+    void verifyWritableRefusesAFolderThatCannotBeWritten() throws Exception {
+        Path notAFolder = Files.write(dir.resolve("plain-file"), new byte[]{1});
+
+        assertThatThrownBy(() -> new InvoiceDocumentStorage(notAFolder.toString()).verifyWritable())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("is not writable by this process");
+        assertThat(fileNames(dir)).containsExactly("plain-file");
+    }
+
+    private static List<String> fileNames(Path folder) throws Exception {
+        try (Stream<Path> files = Files.list(folder)) {
+            return files.map(p -> p.getFileName().toString()).collect(Collectors.toList());
+        }
     }
 
     @Test

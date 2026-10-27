@@ -180,6 +180,12 @@ with `.pdf`, content type `application/pdf` / `application/x-pdf` / `application
 batch — another vendor's identical file is neither blocked nor revealed), `NESTED_FOLDER` (file in a sub-folder of a
 folder upload), `SOURCE_MISMATCH` (declared `source` ≠ batch source). Max **100 accepted files per batch**.
 
+**Temporary free demo only** (`render-free-demo`): before every other rule, the file must be one of the six published
+synthetic fixtures in `react-handoff/demo-fixtures/` (exact bytes, SHA-256 allowlist). Anything else → 422
+`NOT_A_DEMO_FIXTURE`, nothing is stored, and the response and the batch's rejection list show the neutral name
+`file-not-accepted-by-demo.pdf` instead of the uploaded file's own name. Match rejected rows by request order, not by
+`fileName`. Other environments do not have this rule.
+
 Side effects of a 202: the PDF is written to private storage under a random UUID (SHA-256 verified after writing),
 `invoice_documents` + `invoices` (`QUEUED`) + `extraction_jobs` rows are inserted in one transaction (the file is deleted
 again if that transaction fails), and the batch counters change. **Nothing calls Gemini during upload.**

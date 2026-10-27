@@ -1,0 +1,47 @@
+%PDF-1.4
+%SYNTHETIC-DEMO-FIXTURE
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 702 >>
+stream
+BT
+/F2 16 Tf 1 0 0 1 50 780 Tm (SYNTHETIC DEMO INVOICE - NOT A REAL DOCUMENT) Tj
+/F1 10 Tf 1 0 0 1 50 758 Tm (Free-demo fixture for the Actify Invoice Process API. Contains no real customer data.) Tj
+/F1 12 Tf 1 0 0 1 50 724 Tm (Invoice number: DEMO-0005) Tj
+/F1 12 Tf 1 0 0 1 50 702 Tm (Invoice date: 2026-10-05) Tj
+/F1 12 Tf 1 0 0 1 50 680 Tm (Seller: Synthetic Seller 05 \(demo\)   Tax ID: 6000000005) Tj
+/F1 12 Tf 1 0 0 1 50 658 Tm (Buyer: Synthetic Buyer \(demo\)) Tj
+/F1 12 Tf 1 0 0 1 50 636 Tm (Currency: INR) Tj
+/F1 12 Tf 1 0 0 1 50 614 Tm (Item: Synthetic Notebook Pack | qty 5 x 150.00 = 750.00 | tax 18%) Tj
+/F1 12 Tf 1 0 0 1 50 592 Tm (Subtotal: 750.00   Tax: 135.00   Total: 885.00) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000033 00000 n 
+0000000082 00000 n 
+0000000139 00000 n 
+0000000275 00000 n 
+0000001027 00000 n 
+0000001097 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R >>
+startxref
+1172
+%%EOF

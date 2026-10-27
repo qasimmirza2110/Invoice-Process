@@ -132,7 +132,7 @@ paths:
                 source: { type: string, enum: [LOCAL, GOOGLE_DRIVE, ONEDRIVE] }
       responses:
         '202': { description: Accepted and queued, content: { application/json: { schema: { $ref: '#/components/schemas/FileIntakeResponse' } } } }
-        '422': { description: 'Rejected (INVALID_FILE, DUPLICATE_FILE, NESTED_FOLDER, SOURCE_MISMATCH)', content: { application/json: { schema: { $ref: '#/components/schemas/FileIntakeResponse' } } } }
+        '422': { description: 'Rejected (INVALID_FILE, DUPLICATE_FILE, NESTED_FOLDER, SOURCE_MISMATCH; free demo only: NOT_A_DEMO_FIXTURE)', content: { application/json: { schema: { $ref: '#/components/schemas/FileIntakeResponse' } } } }
         '400': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
@@ -604,7 +604,7 @@ components:
         accepted: { type: boolean }
         invoiceId: { type: integer, format: int64, nullable: true }
         status: { allOf: [ { $ref: '#/components/schemas/InvoiceStatus' } ], nullable: true }
-        code: { type: string, nullable: true, enum: [INVALID_FILE, DUPLICATE_FILE, NESTED_FOLDER, SOURCE_MISMATCH, null] }
+        code: { type: string, nullable: true, enum: [INVALID_FILE, DUPLICATE_FILE, NESTED_FOLDER, SOURCE_MISMATCH, NOT_A_DEMO_FIXTURE, null], description: "NOT_A_DEMO_FIXTURE only in the temporary free demo (render-free-demo): the file is not one of the published synthetic fixture PDFs" }
         message: { type: string }
     CloudSource:
       type: object

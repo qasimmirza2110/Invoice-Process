@@ -4,6 +4,20 @@ Status: **prepared, not deployed** (2026-10-27). Nothing in this repository crea
 step below is a deliberate action by the owner. Facts about Render were checked against render.com/docs on 2026-10-27
 (disks, health checks); re-check them when you deploy, because platform plans and limits change.
 
+**Two separate targets — never mix them:**
+
+| | A. Temporary free demo | B. Production |
+|---|---|---|
+| Profile | `render-free-demo` (`application-render-free-demo.properties`) | `render` (`application-render.properties`) |
+| Purpose | frontend integration with **synthetic data only** | real customer invoices |
+| Render plans | Free web service + Free Postgres ($0) | paid web service with disk + paid Postgres with backups |
+| PDFs | ephemeral `/tmp/invoice-demo-documents-EPHEMERAL` | persistent disk `/var/data/invoice-documents` |
+| Gemini / worker | refused at startup | owner decision, gate G4 |
+| Runbook | **section 13** | sections 0–12 |
+
+The production `render` profile must **not** be run on a Free service: Free has no disk, so its storage probe would
+pass on the image's ephemeral folder and PDFs would silently vanish on the next spin-down.
+
 ---
 
 ## 0. Release gates — read first
@@ -12,15 +26,16 @@ The container builds and starts the API, but that alone does **not** make it saf
 
 | Gate | Status | What closes it |
 |---|---|---|
-| G1 Durable PDF storage | **BLOCKED** | A Render persistent disk mounted at `/var/data`, `INVOICE_STORAGE_DIR=/var/data/invoice-documents`, write test passed, backup procedure tested (section 6) |
-| G2 Schema bootstrap for an empty database | **BLOCKED** | A reviewed, complete `CREATE` script for all 12 tables (section 5.3). Today `invoices` / `invoice_items` exist in no reviewed script |
-| G3 Database backups | open | Render Postgres plan with backups chosen; one restore rehearsed into a scratch database (section 5.5) |
+| G1 Durable PDF storage | **BLOCKED** (code ready) | Code: atomic, fsynced writes and a startup write probe (`invoice.storage.verify-on-startup=true` in `render`). Still needed: a Render persistent disk mounted at `/var/data`, `INVOICE_STORAGE_DIR=/var/data/invoice-documents`, the post-deploy persistence test and a tested PDF backup (sections 6, 9) |
+| G2 Schema bootstrap for an empty database | **REHEARSED** (2026-10-27) | `docs/sql/invoice-process-bootstrap-schema.sql` creates all 12 tables; matched to the JPA mappings by `SchemaBootstrapScriptTest`; rehearsed on a disposable scratch database: applied, second run refused with no change, app started with `validate` and passed a 37-check synthetic smoke test. Still needed per environment: apply once to the new hosted database (section 5.3, step 6) |
+| G3 Database backups | open | A **paid** Render Postgres plan (Free has no backups and expires after 30 days); one point-in-time restore rehearsed into a new database (section 5.5) |
 | G4 Secrets | open | `INVOICE_JWT_SECRET`, DB password, Gemini key set only as Render environment values; legacy Gemini key rotated (section 10) |
 | G5 Frontend origin | open | React served from the **same origin** as the API (handoff, section 1.3) |
 | G6 Proxy behaviour verified | open | Post-deploy checks in section 9 pass |
 
-Until G1 and G2 are closed the service must not receive **real customer invoices**. A test deployment with synthetic
-PDFs only is fine once G2 is closed (an empty schema-less database cannot even start: `ddl-auto=validate` fails).
+Until G1, G2 and G3 are closed the service must not receive **real customer invoices**. A staging deployment with
+synthetic PDFs only is fine once the G2 rehearsal has passed (an empty schema-less database cannot even start:
+`ddl-auto=validate` fails).
 
 ---
 
@@ -40,8 +55,13 @@ therefore also the first image build — watch its log.
 
 ## 2. Create the Web Service (Render dashboard)
 
-1. New → **Web Service** → connect the GitHub repository, choose the release branch.
-2. Runtime: **Docker** (Render finds `Dockerfile` at the repository root). No build or start command is needed.
+1. New → **Web Service** → connect the GitHub repository, choose the release branch (`main`).
+2. Runtime: **Docker** (Render finds `Dockerfile` at the repository root; leave Dockerfile Path and Docker Command
+   empty — the image's `ENTRYPOINT` starts the JAR). Do **not** add build-time secrets: Render passes environment
+   variables to the Docker build as build arguments too, and this Dockerfile needs none.
+   **Auto-Deploy: Off** (Settings → Build & Deploy) for a manual, controlled release; deploy with Manual Deploy →
+   *Deploy latest commit* (or *Deploy a specific commit*). "After CI Checks Pass" would never deploy: the repository
+   has no CI checks.
 3. Instance type: a **paid** instance (persistent disks are not available on free instances). Size: at least 512 MB
    RAM; the JVM uses up to 75 % of the container memory (`-XX:MaxRAMPercentage=75`).
 4. Region: the same region as the PostgreSQL database (internal connection, lower latency).
@@ -83,10 +103,12 @@ folder inside the container (test: `DefaultProfileBootLoadingTest.theRenderProfi
 | `INVOICE_GOOGLE_*`, `INVOICE_ONEDRIVE_*` | no | no (public browser values) | cloud picker configuration, see the provider guide |
 
 Do **not** set `INVOICE_WORKER_ONLY_INVOICE_IDS` in production unless you deliberately want the worker restricted to
-named invoices. Do not set any `spring.jpa.*`, `hibernate.*` or `spring.sql.init.*` variable: `SchemaSafetyGuard`
+named invoices. Do not set any `spring.jpa.*`, `hibernate.*`, `spring.sql.init.*` or `spring.datasource.*` override (other than via `INVOICE_DB_*`): `SchemaSafetyGuard`
 refuses schema-changing values.
 
-How the guard decides (`config/SchemaSafetyGuard`, before any connection): profile `render` is a non-demo profile →
+How the guard decides (`config/SchemaSafetyGuard`, before any connection): first, no setting may redirect the connection
+away from `spring.datasource.url` (`SPRING_DATASOURCE_HIKARI_*`, `SPRING_DATASOURCE_JNDINAME`, `SPRING_DATASOURCE_TYPE` are
+refused - added 2026-10-27, `DataSourceRedirectGuardTest`); then profile `render` is a non-demo profile →
 `INVOICE_LIVE_START_APPROVED` must be `true` → `INVOICE_APPROVED_DATABASE` must parse as `host:port/database` and equal
 the endpoint parsed from `INVOICE_DB_URL` (credentials or multiple hosts in the URL are refused) → all schema settings
 must be non-mutating. Tested in `DefaultProfileBootLoadingTest.theRenderProfileBindsToPortAndAllInterfacesAndStaysGuarded`.
@@ -110,20 +132,41 @@ Use the database's **internal** hostname when the service and the database are i
 
 ### 5.3 Schema bootstrap (gate G2) — backup-first, never automatic
 
-The application never creates or alters tables (`ddl-auto=validate`, enforced by `SchemaSafetyGuard`). The reviewed
-scripts in `docs/sql/` are *migrations* for an existing database; the base tables `invoices` and `invoice_items` (and
-`invoice_documents`, `invoice_versions`, which exist only as commented reference DDL) were created by Hibernate during
-development. A complete bootstrap script must be produced and reviewed first:
+The application never creates or alters tables (`ddl-auto=validate`, enforced by `SchemaSafetyGuard`); there is no
+Flyway/Liquibase on purpose (a migration tool would change the hosted schema automatically at every start).
+The complete schema for an **empty** database is **`docs/sql/invoice-process-bootstrap-schema.sql`** (schema version 1,
+12 tables, 15 foreign keys, 4 unique constraints, 13 secondary indexes). The two older scripts in `docs/sql/` remain
+*migrations* for databases that already existed; never run them on a fresh database.
 
-1. On the **isolated test database** only, run the pgtest suite once (`./mvnw -o test -Ppgtest`); Hibernate creates the
-   full schema there (the one place `ddl-auto=update` is allowed).
-2. Export it read-only: `pg_dump --schema-only --no-owner --no-privileges -d Actify-Internship-Invoice-Process_test_db`.
-3. Compare it with `docs/sql/invoice-process-workflow-migration.sql`, which tightens constraints beyond what Hibernate
-   generates; merge those constraints in. Review every statement (no `DROP`, no data).
-4. Rehearse: create a scratch database, apply the script with `psql -v ON_ERROR_STOP=1`, start the application against
-   it locally with the approval variables naming the scratch database → it must start without schema errors.
-5. Commit the reviewed script as `docs/sql/invoice-process-bootstrap-schema.sql`.
-6. Apply it once to the new hosted database (empty, so no backup is lost — still take Render's snapshot/backup first).
+How the script was built and is kept honest:
+
+- Every definition is copied from a reviewed source (workflow migration, versioning reference DDL) or, for `invoices`
+  and `invoice_items`, from the schema Hibernate generates for the current mappings (identical in the test and
+  local-demo databases, read-only `pg_dump --schema-only`, 2026-10-27). The only addition is the
+  `ix_invoice_items_invoice` index. The header lists the source of each table.
+- `SchemaBootstrapScriptTest` (runs in every `./mvnw test`, no database) fails when any mapped table, column, SQL type,
+  varchar length, NOT NULL, named index, unique constraint or foreign key differs from the script, or when the script
+  contains `DROP`/`TRUNCATE`/`DELETE`/`UPDATE`/`INSERT`/`ALTER TABLE`. Mutation-checked: changing one length or
+  removing one NOT NULL makes it fail.
+- Fail-fast and repeat-safe: one transaction; a guard refuses (before any change) a database whose schema `public`
+  already has a table, and the four local development databases by name. A second run changes nothing.
+
+Rehearsal still required (owner approval, a **new disposable** scratch database — never the primary, test or demo
+database):
+
+1. `createdb` an empty scratch database, e.g. `invoice_process_bootstrap_scratch_db`.
+2. `psql -v ON_ERROR_STOP=1 -X -d invoice_process_bootstrap_scratch_db -f docs/sql/invoice-process-bootstrap-schema.sql`
+   → exit 0; the read-only checks at the end show 12 tables, 15 `f`, 4 `u`, 13 indexes.
+3. Run it a second time → exit ≠ 0 with `bootstrap refused: schema public already contains 21 table/view/sequence object(s)` (12 tables + 9 identity sequences); take a
+   `pg_dump --schema-only` before and after this run → identical.
+4. Start the application against it with ddl-auto unchanged (`validate`): `INVOICE_DB_URL` = the scratch URL,
+   `INVOICE_LIVE_START_APPROVED=true`, `INVOICE_APPROVED_DATABASE=localhost:5432/invoice_process_bootstrap_scratch_db`,
+   `INVOICE_JWT_SECRET` = a throw-away value, `INVOICE_BOOTSTRAP_ADMIN_EMAIL/PASSWORD` = a synthetic admin
+   (`@example.test`), worker off, no Gemini key → it must start without `Schema-validation` errors.
+5. Synthetic smoke test against it (login with CSRF, create a category, upload one synthetic PDF as a vendor, read it
+   back as admin), then stop the application and `dropdb` the scratch database.
+6. On Render: apply the same script once to the new, empty database (section 5.3 is its only schema step), from a
+   machine allowed to connect (Render's external URL with `sslmode=require`, or a Render shell).
 
 ### 5.4 First administrator
 
@@ -133,10 +176,36 @@ first successful login, then redeploy.
 
 ### 5.5 Backup and restore
 
-- Use a Render Postgres plan with automatic backups / point-in-time recovery, or schedule `pg_dump -Fc` to storage
-  you control. Record the retention period.
-- Before every schema change: fresh dump → restore into a scratch database → run the change there → validate the app.
-- Rehearse one full restore before go-live and write down the time it took.
+What Render provides (render.com/docs/postgresql-backups and /docs/free, checked 2026-10-27):
+
+| Plan | Point-in-time recovery (PITR) | Logical exports |
+|---|---|---|
+| Free | **none** — and Free databases expire 30 days after creation (14-day grace, then deleted), 1 GB | none |
+| Paid, Hobby workspace | past **3 days** | on demand ("Create export"), kept 7 days, `.dir.tar.gz` |
+| Paid, Pro workspace or higher | past **7 days** | same |
+
+A PITR restore always creates a **new** database instance; the original is untouched until you switch the service's
+`INVOICE_DB_URL` to it. A restore cannot target the last 10 minutes. → Real invoices need a **paid** database.
+
+Decisions for the owner (write them down before go-live): recovery-point objective (how many hours of invoices may
+be lost — PITR window and export frequency), recovery-time objective (how long the service may be down), retention
+beyond Render's 3/7 days (e.g. a weekly export downloaded to encrypted storage you control), and who may access
+backups (Render workspace members with database access can create and download exports — keep that list short).
+
+Procedure:
+
+- **Before every schema change and before go-live:** "Create export" (or `pg_dump -Fc` over the external URL), record
+  time and size.
+- **Restore rehearsal (once before go-live, then quarterly):** PITR into a *new* database → connect read-only → compare
+  row counts of `invoices`, `invoice_items`, `invoice_documents`, `invoice_versions`, `app_users` with the source at the
+  same time; run `docs/sql/invoice-versioning.sql` Part B (B4, B5, B7 expect no rows). Optionally point a *staging*
+  service at it and log in. Record how long it took. Delete the rehearsal database afterwards.
+- **Real recovery:** stop uploads (suspend the service or set it to maintenance), PITR to a time just before the
+  incident, validate as above, switch `INVOICE_DB_URL`/`INVOICE_APPROVED_DATABASE` to the new instance, deploy, keep
+  the old instance until the switch is confirmed.
+- Never restore an export into a database that has data (the documented restore commands drop and recreate objects).
+- Credentials: exports contain every invoice; download only to an encrypted disk, never to a shared folder, never to
+  Git. Connection strings with passwords go in a password file or environment variable, never on a command line.
 - Database backups do **not** contain the PDFs; they live on the disk (section 6). Restore both to the same point in
   time, otherwise `invoice_documents` rows point at missing files (download → 404) or files have no row (orphans).
 
@@ -159,10 +228,20 @@ would be lost on the next deploy while its database row remains.
 | Snapshots | automatic every 24 h, kept 7 days; restore replaces the **whole** disk (later changes are lost) |
 
 **Ownership check (risk to validate):** the image runs as the non-root user `invoice`. Render's documentation does not
-state the ownership of a freshly mounted disk. After the first deploy, verify through the Render shell:
-`touch /var/data/invoice-documents/.write-test && rm /var/data/invoice-documents/.write-test`. If it fails with
-"permission denied", the first upload would fail with a 500 — fix the ownership before accepting uploads (for example
-by adjusting the Dockerfile's user/UID to match the mount, after checking Render's current guidance for Docker disks).
+state the ownership of a freshly mounted disk (re-checked 2026-10-27). The `render` profile therefore sets
+`invoice.storage.verify-on-startup=true`: at startup, before the web server accepts traffic, `StorageStartupCheck`
+creates `INVOICE_STORAGE_DIR` if needed, writes, fsyncs, reads back and deletes a probe file. If the mount is not
+writable the start fails with `invoice.storage.dir /var/data/invoice-documents is not writable by this process`, the
+health check never passes and Render keeps the previous version — no upload can fail half-way. Fixing it is a
+deliberate Dockerfile change (user/UID matching the mount) after checking Render's current guidance; do not run the
+container as root to work around it.
+
+The probe proves *writable*, not *persistent*: the same folder exists (empty, ephemeral) in the image when no disk is
+attached. Persistence is proven only by the redeploy test in section 9.
+
+**Write path:** each PDF is written to `.<uuid>.pdf.tmp`, forced to the device, renamed atomically to `<uuid>.pdf` and
+read back against its SHA-256 before the database row is committed. Leftover `.*.tmp` files only come from a crash
+mid-write; they are never served and may be deleted while the service is stopped.
 
 ### 6.2 Backup and recovery of the PDFs
 
@@ -184,8 +263,13 @@ release.
 
 `GET /api/health` → `200 {"status":"UP"}` (public, no cookie needed, `Cache-Control: no-store`). It confirms the JVM,
 Spring context and web server are up. It deliberately does **not** check the database or Gemini and reveals no version,
-configuration or user data (`HealthController`, test `ApiOnlySurfaceWebTest`). Render routes traffic only after the
-check passes, stops routing after ~15 s of failures and restarts after ~60 s.
+configuration or user data (`HealthController`, test `ApiOnlySurfaceWebTest`). Render (docs/health-checks, checked
+2026-10-27): 2xx/3xx within 5 s is healthy; a new deploy receives traffic only after it passes, and if it does not pass
+within 15 minutes Render cancels the deploy and keeps the existing instance. A running instance is taken out of
+traffic after 15 s of failures and restarted after 60 s. With a disk attached the old instance is stopped *before* the
+new one starts (no zero-downtime deploys). The docs do not say how long the service is down when the new start then
+fails; assume an outage until a rollback (section 12, step 14) or a fixed deploy succeeds — deploy at
+quiet times.
 No Spring Boot Actuator endpoints are included or exposed.
 
 ## 8. Operations
@@ -202,11 +286,14 @@ who can read it.
 |---|---|
 | `SchemaSafetyGuard: REFUSING to start - starting against a non-test database is not approved` | `INVOICE_LIVE_START_APPROVED` missing / not `true` |
 | `... the datasource points at X but only Y is approved` | `INVOICE_APPROVED_DATABASE` ≠ host:port/database in `INVOICE_DB_URL` |
+| `... is set. It would redirect the database connection away from the approved spring.datasource.url` | a `SPRING_DATASOURCE_HIKARI_*`, `SPRING_DATASOURCE_JNDINAME` or `SPRING_DATASOURCE_TYPE` variable is set; remove it (`DataSourceRedirectGuardTest`) |
 | `Could not resolve placeholder 'INVOICE_DB_URL'` / `'INVOICE_STORAGE_DIR'` | variable missing in the render profile |
 | `INVOICE_JWT_SECRET is not set` / `too short` / `not valid Base64` | signing key missing or invalid (the value is never printed) |
 | `Schema-validation: missing table` | gate G2 not done: the database has no (complete) schema |
 | `Connection refused` / `password authentication failed` | network, hostname, SSL mode or credentials |
 | `invoice.storage.dir must be an absolute path` | relative `INVOICE_STORAGE_DIR` |
+| `invoice.storage.dir ... is not writable by this process` | disk not mounted where `INVOICE_STORAGE_DIR` points, mounted read-only, or owned by another user (section 6.1) |
+| `bootstrap refused: ...` (when running the SQL script, not the app) | the target database is not empty / is a local database — nothing was changed |
 
 **Shutdown and the worker.** On deploy/restart Render sends SIGTERM; the JVM is PID 1 and `server.shutdown=graceful`
 lets in-flight HTTP requests finish (up to 25 s). The extraction worker runs on one scheduler thread; a Gemini call in
@@ -263,3 +350,171 @@ process.
    validation).
 5. Database-level append-only protection for versions and workflow events (today enforced by the application).
 6. A readiness check that includes the database, if Render routing should depend on it.
+
+## 12. Owner runbook — first deployment, in order
+
+Every step is manual. **Staging** = synthetic data only (`@example.test` users, generated PDFs). **Production** =
+real customer invoices; it needs every gate in section 0 closed. Stop at the first step that fails.
+
+1. **Gates.** G2 rehearsal (5.3) passed locally; `./mvnw -o clean package` green on the commit you deploy; the
+   commit is on `main`. Production additionally: G1, G3 decisions written down, G4 key rotation done.
+2. **Database.** Render → New → Postgres, same region as the service, a **paid** instance type (Free: no backups,
+   expires after 30 days — acceptable only for a throw-away staging test). Note the RPO/RTO decision (5.5).
+3. **Schema.** From the Info page take hostname, port, database, user (password stays in your password manager).
+   Apply `docs/sql/invoice-process-bootstrap-schema.sql` once with `psql -v ON_ERROR_STOP=1` over the external URL
+   (`sslmode=require`); expect the 12/15/4/13 check result. Never let the application create tables.
+4. **Service.** New → Web Service → GitHub `qasimmirza2110/Invoice-Process` → branch `main`.
+5. **Runtime.** Docker; Dockerfile at the root; build context = repository (`.dockerignore` keeps only `pom.xml` and
+   `src/`); Docker Command empty. Instance type: **paid** (disks are not available on Free); 1 instance.
+6. **Auto-Deploy: Off.**
+7. **Environment** (section 4; names only here, values typed into the dashboard):
+   `INVOICE_DB_URL` = `jdbc:postgresql://<internal-host>:5432/<database>` (no credentials in it; Render's own
+   `postgresql://user:password@host/db` URL is not read), `INVOICE_DB_USERNAME`, `INVOICE_DB_PASSWORD`,
+   `INVOICE_LIVE_START_APPROVED=true`, `INVOICE_APPROVED_DATABASE=<internal-host>:5432/<database>` (same spelling as
+   the URL), `INVOICE_JWT_SECRET` (new, Base64 of ≥ 32 random bytes, e.g. `openssl rand -base64 48` on your own
+   machine), `INVOICE_STORAGE_DIR=/var/data/invoice-documents`, `INVOICE_BOOTSTRAP_ADMIN_EMAIL` /
+   `INVOICE_BOOTSTRAP_ADMIN_PASSWORD` (12–72 bytes, first start only). Leave **unset**: `GEMINI_API_KEY`, all
+   `GEMINI_LIMIT_*`, `INVOICE_WORKER_ENABLED`, `INVOICE_LEGACY_EXTRACT_ENABLED`, `INVOICE_GOOGLE_*`,
+   `INVOICE_ONEDRIVE_*`, any `SPRING_*`/`spring.jpa.*` override. `SPRING_PROFILES_ACTIVE=render` comes from the image.
+8. **Disk.** Add a persistent disk, mount path `/var/data`, smallest size that fits (it can grow, never shrink).
+9. **Health check path:** `/api/health`.
+10. **First deploy.** Manual Deploy → Deploy latest commit. Watch the log for, in order: Maven `BUILD SUCCESS` in the
+    image build; `Invoice PDF storage folder verified`; `Started InvoiceApplication`; `Tomcat started on port(s): 10000`.
+    Failure signals are listed in section 8 (`SchemaSafetyGuard: REFUSING`, `Could not resolve placeholder`,
+    `INVOICE_JWT_SECRET ...`, `Schema-validation: missing ...`, `is not writable by this process`,
+    `password authentication failed`).
+11. **Smoke tests** (section 9, synthetic only): health 200; `/` 401 JSON; XSRF cookie `Secure`; login sets
+    `INVOICE_PROCESS_AUTH` `HttpOnly; Secure; SameSite=Strict`; a POST without `X-XSRF-TOKEN` → 403; a vendor cannot
+    call `/api/admin/**` (403) and cannot read another vendor's invoice (404); unexpected errors show only an
+    `errorId`; the login-limiter check (9.4) passes.
+12. **PDF persistence:** upload one synthetic PDF as a test vendor, download it as admin and compare its SHA-256 with
+    the local file; Manual Deploy again (and once Restart service); download again → same SHA-256. Then remove the
+    bootstrap admin variables and redeploy.
+13. **Backup rehearsal** (5.5): wait > 10 minutes, PITR into a new database, compare counts, delete it. Record times.
+14. **Rollback / disable if anything fails:** Dashboard → the service → Rollback to the previous successful deploy
+    (this also switches Auto-Deploy off), or **Suspend** the service to stop all traffic. Rollbacks never touch the
+    disk or the database; a schema problem is fixed only by a reviewed script on a scratch copy first, never by
+    switching the app to `ddl-auto=update`.
+15. **Must stay unconfigured until every gate is closed:** Gemini key and limits (worker off), cloud pickers,
+    customer accounts and real invoices, a custom domain announced to users, any second instance, any separate
+    frontend origin (G5 — same origin only).
+
+Production go-live = steps 1–15 green on staging, plus: paid database with backups, disk snapshot + off-platform
+PDF copy procedure tested (6.2), new Gemini key (old one revoked in Google AI Studio) only when extraction is switched
+on, and the RPO/RTO decision recorded.
+
+## 13. Part A — temporary free demo (`render-free-demo`), $0, synthetic data only
+
+For a frontend developer to integrate against the real API. **Not production**, no customer data, no SLA.
+Render facts (checked 2026-10-27: [free](https://render.com/docs/free), [disks](https://render.com/docs/disks),
+[postgresql-backups](https://render.com/docs/postgresql-backups), [health-checks](https://render.com/docs/health-checks),
+[your-first-deploy](https://render.com/docs/your-first-deploy)):
+
+- Free web service: spins down after 15 minutes without inbound traffic, about one minute to start again, may be
+  restarted at any time; 750 free instance hours per workspace per month (then suspended until the next month).
+- Ephemeral filesystem, **no persistent disks** on Free: files are lost on every redeploy, restart and spin-down.
+- Free Postgres: 1 GB, **expires 30 days after creation**, 14-day grace period, then deleted; **no backups** of any kind.
+- Render: "Do not use them for production applications."
+
+### 13.1 What the profile enforces (`RenderFreeDemoGuard`, before any connection)
+
+The start is refused unless `SPRING_PROFILES_ACTIVE` is exactly `render-free-demo` and the **effective**
+configuration (environment variables override the profile file) has: no `GEMINI_API_KEY`; `INVOICE_WORKER_ENABLED`
+and `INVOICE_LEGACY_EXTRACT_ENABLED` false; no `INVOICE_GOOGLE_*` / `INVOICE_ONEDRIVE_*` picker ids; storage exactly
+under `/tmp/invoice-demo-documents-EPHEMERAL` (never `/var/data`, no `..`); Secure cookies; a real
+`INVOICE_JWT_SECRET` (no random-key fallback); a bootstrap admin ending in `@example.test`. Every account created in
+the demo must end in `@example.test` (`AppUserService`, 400 otherwise). Every response carries
+`X-Invoice-Demo: ephemeral-synthetic-only`. `SchemaSafetyGuard` applies in full (database approval, no connection
+redirects, `validate`).
+**Uploads:** only the six synthetic fixtures in `docs/react-handoff/demo-fixtures/` are accepted (exact SHA-256,
+`invoice.free-demo.allowed-upload-sha256`; the guard refuses an empty or malformed list). Every other file is rejected
+with 422 `NOT_A_DEMO_FIXTURE` **before any other check** - never stored, and recorded under the neutral name
+`file-not-accepted-by-demo.pdf`, because a real file's name can itself be customer data (`FreeDemoUploadPolicy`).
+Synthetic e-mail addresses alone would prove nothing about a file's content.
+Any other profile that points its storage at the demo folder is refused. Tests: `RenderFreeDemoGuardTest`,
+`DefaultProfileBootLoadingTest.theFreeDemoProfileIsSeparateGuardedAndRefusesOverrides`, `FreeDemoSurfaceWebTest`,
+`AppUserServiceTest`, `FreeDemoUploadIntakeTest`, `FreeDemoFixtureTest`.
+
+**Consequence:** with no extraction, uploaded invoices stay `QUEUED`; review, submit and approval are **unavailable**
+in the demo (the React handoff is contract-only for them). A deterministic synthetic extraction adapter would need
+changes to the production worker and Gemini accounting and is a separate decision.
+
+### 13.2 Manual steps, in order
+
+1. **Code on `main`:** the demo profile, guard and bootstrap script are merged and `./mvnw -o clean package` is green
+   on that commit. Do not deploy a branch.
+2. **Schema rehearsal:** done 2026-10-27 on a disposable scratch database (see the script header); repeat the section 5.3
+   rehearsal only if the script changes (owner approval naming `invoice_process_bootstrap_scratch_db`).
+3. **Free Postgres:** Render → New → Postgres → instance type **Free**, same region you will use for the service.
+   Write down: creation date, **expiry date = creation + 30 days**, "synthetic data only".
+4. **Schema:** apply the bootstrap script once over the database's external URL with `sslmode=require`
+   (`psql -v ON_ERROR_STOP=1 -X -f docs/sql/invoice-process-bootstrap-schema.sql`, connection via `PG*` variables,
+   never a password on the command line). Expect 12 tables / 15 `f` / 4 `u` / 13 indexes.
+5. **Web service:** Render → New → Web Service → `qasimmirza2110/Invoice-Process` → branch `main` → Language
+   **Docker** (Dockerfile at the root, Docker Command empty) → Compute **Free**.
+6. **Auto-Deploy:** right after creation, Settings → Build & Deploy → **Auto-Deploy: Off** (the creation form may not
+   show it); deploy only with Manual Deploy.
+7. **Environment** (names below; values typed into the dashboard, never committed):
+
+   | Name | Value |
+   |---|---|
+   | `SPRING_PROFILES_ACTIVE` | `render-free-demo` (overrides the image's `render`) |
+   | `INVOICE_DB_URL` | `jdbc:postgresql://<internal-host>:5432/<database>` (no credentials in it) |
+   | `INVOICE_DB_USERNAME`, `INVOICE_DB_PASSWORD` | from the Free database's Info page |
+   | `INVOICE_LIVE_START_APPROVED` | `true` |
+   | `INVOICE_APPROVED_DATABASE` | `<internal-host>:5432/<database>` (same spelling as the URL) |
+   | `INVOICE_JWT_SECRET` | a **new, throw-away** Base64 value of ≥ 32 random bytes, only for this demo |
+   | `INVOICE_BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` | the planned admin `sanjay.admin@example.test` (section 13.3) and a new password; first start only |
+
+   Do **not** set: `GEMINI_API_KEY` or any `GEMINI_*`, `INVOICE_WORKER_*`, `INVOICE_LEGACY_EXTRACT_ENABLED`,
+   `INVOICE_GOOGLE_*`, `INVOICE_ONEDRIVE_*`, `INVOICE_STORAGE_DIR`, `INVOICE_COOKIE_SECURE`,
+   `INVOICE_FREE_DEMO_ALLOWED_UPLOAD_SHA256`, any `SPRING_JPA_*` or `SPRING_DATASOURCE_*` (the guards refuse
+   Gemini, worker, picker, storage, schema-changing and connection-redirecting values).
+8. **Health check path:** `/api/health`.
+9. **Deploy:** Manual Deploy → Deploy latest commit. In the log expect `The following 1 profile is active:
+   "render-free-demo"`, `FREE DEMO MODE`, `Invoice PDF storage folder verified`, `Started InvoiceApplication`.
+   A refusal starts with `RenderFreeDemoGuard: REFUSING` or `SchemaSafetyGuard: REFUSING` and names the setting.
+10. **Synthetic smoke test** (browser or Postman with the demo environment, synthetic data only): health 200 with the
+    `X-Invoice-Demo` header; `GET /api/auth/me` 401 with an `XSRF-TOKEN` cookie; login as the bootstrap admin with
+    `X-XSRF-TOKEN`; create the section 13.3 accounts (a non-`@example.test` address must answer 400); create the
+    categories; as a vendor create a batch and upload `synthetic-demo-invoice-01.pdf` (202, `QUEUED`), any other PDF
+    (422 `NOT_A_DEMO_FIXTURE`) and the same fixture again (422 `DUPLICATE_FILE`); download the accepted file as admin
+    and compare its SHA-256. Then remove the two bootstrap variables and redeploy.
+11. **Handoff package:** `.\scripts\prepare-react-handoff.ps1 -ApiBaseUrl "https://<exact-url-from-dashboard>"` →
+    `target/React-Developer-Handoff.zip` (refuses to build unless the health check passes **and** the demo header is
+    present). Check it once with `-SelfTest` beforehand if you like (that ZIP is marked NOT VERIFIED; never send it).
+12. **Send** the ZIP and the base URL to the React developer. Share the synthetic demo credentials **separately**
+    over a private channel — never in the ZIP, a ticket, a repository or a chat with others.
+13. **Tell them:** the URL may sleep (≈ 1 minute cold start), PDFs disappear on restart/redeploy/spin-down, the
+    database (and every demo account) disappears on the expiry date, review/approval data does not exist in the demo.
+14. **Never** use a real customer's name, e-mail, invoice, document or credential in the demo — not even "just to test".
+
+**Rollback / stop:** Dashboard → Rollback (also turns Auto-Deploy off) or Suspend the service. When the demo ends,
+delete the Free database and the service; nothing in them may be needed later.
+
+### 13.3 Planned synthetic demo accounts (no passwords here, ever)
+
+Recreations of the team's demo personas for the free demo only. They are **not** copies of any account in another
+database: no real e-mail address or password hash is used, and the primary database is never read for them.
+
+| Person | Demo login | Display name | Role | Reviewer categories |
+|---|---|---|---|---|
+| Sanjay | `sanjay.admin@example.test` | Sanjay | ADMIN (bootstrap admin) | – |
+| Omkar | `omkar.vendor@example.test` | Omkar | VENDOR | – |
+| Sakshi | `sakshi.vendor@example.test` | Sakshi | VENDOR | – |
+| Akash | `akash.reviewer@example.test` | Akash | REVIEWER | `IT` |
+| Sahil | `sahil.reviewer@example.test` | Sahil | REVIEWER | `OFFICE` |
+
+The two categories (`IT` "IT equipment", `OFFICE` "Office supplies") are a suggestion so that category-based
+assignment can be shown; adjust before deploying if wanted.
+
+After the first deploy (as Sanjay, through the API, every unsafe call with `X-XSRF-TOKEN`):
+1. `PUT /api/admin/users/{sanjayId}/display-name` `{"displayName":"Sanjay"}` (the bootstrap admin starts as "Administrator").
+2. `POST /api/admin/categories` for `IT` and `OFFICE`.
+3. `POST /api/admin/users` for Omkar, Sakshi, Akash and Sahil (`role` as above, a new 12–72-byte password each).
+4. `PUT /api/admin/users/{id}/categories` `{"categories":["IT"]}` for Akash, `{"categories":["OFFICE"]}` for Sahil.
+5. Remove `INVOICE_BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` and redeploy.
+
+Each password is chosen by the owner, never reused from another system, and given only to that person over a private
+channel - never in the handoff ZIP, a ticket, a chat with others or the repository. When the Free database expires
+(30 days after creation) the accounts disappear with it; repeat these steps on the next database.

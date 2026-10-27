@@ -8,14 +8,19 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
 import java.util.UUID;
 
 /**
@@ -23,13 +28,19 @@ import java.util.UUID;
  * static web folder, so they are only reachable through DocumentController.
  *
  * - File names are generated UUIDs; the client's file name is never part of a path.
- * - Files are created with CREATE_NEW, so an existing file is never overwritten.
+ * - An existing file is never overwritten.
+ * - The bytes are written to a temporary file (".{id}.pdf.tmp"), flushed to the device (fsync), and only then renamed
+ *   atomically to "{id}.pdf". So "{id}.pdf" is either complete or absent - a crash or a full disk mid-write can never
+ *   leave a truncated original under its real name. The database row is committed only after store() returns, so a
+ *   committed invoice_documents row never points at bytes that were still only in the OS cache.
  * - The SHA-256 is checked after writing and again on every read.
  *
  * A file write and a PostgreSQL commit can't be one atomic transaction. The service deletes
  * the file when the database transaction fails; if the process dies in between, an orphan file
  * (no invoice_documents row) can remain. SQL cannot see the disk, so spotting one means comparing the
  * storage folder (files named {id}.pdf) with the invoice_documents ids by hand; no tool for that yet.
+ * Leftover ".*.tmp" files come only from a crash during a write; they are never read and may be deleted while the
+ * application is stopped.
  */
 @Component
 public class InvoiceDocumentStorage {
@@ -37,6 +48,9 @@ public class InvoiceDocumentStorage {
     private static final Logger log = LoggerFactory.getLogger(InvoiceDocumentStorage.class);
 
     private static final String EXTENSION = ".pdf";
+    // A leading dot and a different suffix: resolve() can never map an id to a temporary file.
+    private static final String TEMP_PREFIX = ".";
+    private static final String TEMP_SUFFIX = ".tmp";
 
     private final Path root;
 
@@ -57,13 +71,21 @@ public class InvoiceDocumentStorage {
         String id = UUID.randomUUID().toString();
         String sha256 = sha256Hex(bytes);
         Path target = resolve(id);
+        Path temp = root.resolve(TEMP_PREFIX + id + EXTENSION + TEMP_SUFFIX);
         try {
             Files.createDirectories(root);
-            Files.write(target, bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+            writeDurably(temp, bytes);
+            if (Files.exists(target)) {
+                // Practically impossible with a random UUID - but never overwrite (an atomic rename would replace).
+                throw new FileAlreadyExistsException(target.getFileName().toString());
+            }
+            Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE);
+            syncDirectory();
         } catch (FileAlreadyExistsException e) {
-            // Practically impossible with a random UUID - but never overwrite.
+            deletePathQuietly(temp);
             throw new DocumentStorageException("Could not store the original PDF", e);
         } catch (IOException e) {
+            deletePathQuietly(temp);
             deleteQuietly(id);
             throw new DocumentStorageException("Could not store the original PDF", e);
         }
@@ -112,6 +134,60 @@ public class InvoiceDocumentStorage {
 
     public boolean exists(String id) {
         return Files.exists(resolve(id));
+    }
+
+    /**
+     * Startup self-test (StorageStartupCheck): the directory can be created, a file written, flushed, read back
+     * identically and removed - by THIS process, with ITS user. Fails with IllegalStateException otherwise, so a
+     * missing or read-only mount stops the start instead of failing the first upload with a 500. It proves the
+     * folder is writable now; it cannot prove the folder is on a persistent disk.
+     */
+    public void verifyWritable() {
+        Path probe = root.resolve(TEMP_PREFIX + "write-probe-" + UUID.randomUUID() + TEMP_SUFFIX);
+        byte[] content = ("invoice storage write probe " + UUID.randomUUID()).getBytes(StandardCharsets.US_ASCII);
+        try {
+            Files.createDirectories(root);
+            writeDurably(probe, content);
+            if (!Arrays.equals(Files.readAllBytes(probe), content)) {
+                throw new IllegalStateException("invoice.storage.dir " + root + " returned different bytes than written");
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("invoice.storage.dir " + root + " is not writable by this process ("
+                    + e.getClass().getSimpleName() + ")", e);
+        } finally {
+            deletePathQuietly(probe);
+        }
+    }
+
+    /** CREATE_NEW (never overwrite), every byte written, then forced to the storage device before returning. */
+    private static void writeDurably(Path file, byte[] bytes) throws IOException {
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+            ByteBuffer buffer = ByteBuffer.wrap(bytes);
+            while (buffer.hasRemaining()) {
+                channel.write(buffer);
+            }
+            channel.force(true);
+        }
+    }
+
+    /**
+     * Makes the rename itself durable (Linux: fsync of the directory entry). Best effort: Windows cannot open a
+     * directory as a channel, so there it is skipped; the file content was already forced to disk.
+     */
+    private void syncDirectory() {
+        try (FileChannel directory = FileChannel.open(root, StandardOpenOption.READ)) {
+            directory.force(true);
+        } catch (IOException | RuntimeException e) {
+            log.debug("Directory sync not supported here ({})", e.getClass().getSimpleName());
+        }
+    }
+
+    private static void deletePathQuietly(Path file) {
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException | RuntimeException e) {
+            log.error("Could not delete temporary storage file {}", file.getFileName(), e);
+        }
     }
 
     /**
