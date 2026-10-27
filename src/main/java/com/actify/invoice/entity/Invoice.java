@@ -25,6 +25,18 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * One invoice: the header fields extracted from (and later corrected on) one uploaded PDF, plus its workflow state.
+ *
+ * The fields hold the CURRENT data. Every change also creates an immutable InvoiceVersion snapshot (versioning
+ * package), so this row can be compared against its history but history is never rewritten.
+ *
+ * Workflow columns (owner, batch, category, assigned reviewer, submitted version, status) decide who may see or
+ * change the invoice: InvoiceAccessPolicy and the review services read them; WorkflowTransitions decides which
+ * status changes are legal. Invoices with no owner/batch are "legacy" invoices from the single-file extraction.
+ * Money columns are BigDecimal with scale 2 and are never computed with floating point.
+ * The original PDF is referenced through sourceDocument and never changes after upload.
+ */
 @Entity
 @Table(name = "invoices")
 public class Invoice {

@@ -19,13 +19,14 @@ public class InvoiceVersionResponse {
     private final VersionChangeSource changeSource;
     private final String changeReason;
     private final String changedBy;              // "user:<id>" of the editor; null for background work
+    private final String changedByName;          // e-mail before the "@" of that user; null for background work
     private final LocalDateTime createdAt;
     private final SourceDocumentDto sourceDocument;
     private final List<FieldChange> changedFields;
     private final InvoiceSnapshot snapshot;
 
     public InvoiceVersionResponse(Long invoiceId, Integer versionNumber, VersionChangeSource changeSource,
-                                  String changeReason, String changedBy, LocalDateTime createdAt,
+                                  String changeReason, String changedBy, String changedByName, LocalDateTime createdAt,
                                   SourceDocumentDto sourceDocument, List<FieldChange> changedFields,
                                   InvoiceSnapshot snapshot) {
         this.invoiceId = invoiceId;
@@ -33,6 +34,7 @@ public class InvoiceVersionResponse {
         this.changeSource = changeSource;
         this.changeReason = changeReason;
         this.changedBy = changedBy;
+        this.changedByName = changedByName;
         this.createdAt = createdAt;
         this.sourceDocument = sourceDocument;
         this.changedFields = changedFields;
@@ -44,6 +46,7 @@ public class InvoiceVersionResponse {
     public VersionChangeSource getChangeSource() { return changeSource; }
     public String getChangeReason() { return changeReason; }
     public String getChangedBy() { return changedBy; }
+    public String getChangedByName() { return changedByName; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public SourceDocumentDto getSourceDocument() { return sourceDocument; }
     public List<FieldChange> getChangedFields() { return changedFields; }

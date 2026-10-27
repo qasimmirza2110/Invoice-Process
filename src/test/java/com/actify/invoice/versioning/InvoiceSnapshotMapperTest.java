@@ -14,6 +14,10 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Version snapshots: every business field and item is captured in order, JSON round trips are lossless, numeric
+ * scale differences are not reported as changes, and the field-level diff reports header and item changes correctly.
+ */
 class InvoiceSnapshotMapperTest {
 
     private final InvoiceSnapshotMapper mapper = new InvoiceSnapshotMapper(new ObjectMapper());

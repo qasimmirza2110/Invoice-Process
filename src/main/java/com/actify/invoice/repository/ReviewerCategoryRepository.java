@@ -8,6 +8,10 @@ import org.springframework.data.repository.query.Param;
 
 import java.util.List;
 
+/**
+ * Which reviewer handles which categories. Assignment only succeeds when the invoice's category is in the
+ * reviewer's list (ReviewAssignmentService), so this table is routing configuration rather than history.
+ */
 public interface ReviewerCategoryRepository extends JpaRepository<ReviewerCategory, Long> {
 
     @Query("select rc.categoryCode from ReviewerCategory rc where rc.userId = :userId order by rc.categoryCode")

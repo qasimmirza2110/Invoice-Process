@@ -40,7 +40,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *   no login -> 401 | wrong role on a write route -> 403 | someone else's invoice/PDF -> 404 (same as "not found")
  */
 @WebMvcTest(controllers = {InvoiceController.class, InvoiceVersionController.class, DocumentController.class})
-@WithTask8WebSecurity
+@WithInvoiceWebSecurity
 class InvoiceRouteProtectionWebTest {
 
     private static final String DOC_ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
@@ -67,7 +67,8 @@ class InvoiceRouteProtectionWebTest {
                 get("/api/invoices/5/versions"),
                 get("/api/invoices/5/versions/1"),
                 get("/api/invoices/5/versions/compare").param("from", "1").param("to", "2"),
-                get("/api/documents/" + DOC_ID)};
+                get("/api/documents/" + DOC_ID),
+                get("/api/invoices/5/document")};
     }
 
     @Test
@@ -153,6 +154,38 @@ class InvoiceRouteProtectionWebTest {
         // Vendors still may not correct data (reviewers do, later phases).
         mvc.perform(put("/api/invoices/5").cookie(ownerCookie).with(csrf()).contentType(MediaType.APPLICATION_JSON)
                 .content(UPDATE_BODY)).andExpect(status().isForbidden());
+    }
+
+    /** The invoice-addressed PDF route streams the stored bytes with safe headers, only to someone who may read it. */
+    @Test
+    void theOriginalPdfIsServedByInvoiceIdWithSafeHeadersToTheOwnerOnly() throws Exception {
+        com.actify.invoice.user.AppUser owner = TestLogins.user(7, Role.VENDOR);
+        Cookie ownerCookie = TestLogins.cookieFor(owner, users, tokenService);
+        Cookie otherCookie = TestLogins.cookieFor(TestLogins.user(8, Role.VENDOR), users, tokenService);
+        Invoice invoice = new Invoice();
+        invoice.setId(5L);
+        invoice.setOwner(owner);
+        when(invoiceRepository.findById(5L)).thenReturn(Optional.of(invoice));
+        byte[] original = "%PDF-1.4 original vendor bytes".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        com.actify.invoice.entity.InvoiceDocument document = org.mockito.Mockito.mock(com.actify.invoice.entity.InvoiceDocument.class);
+        when(document.getOriginalFileName()).thenReturn("inv 001.pdf");
+        InvoiceDocumentService.DocumentContent content = org.mockito.Mockito.mock(InvoiceDocumentService.DocumentContent.class);
+        when(content.getDocument()).thenReturn(document);
+        when(content.getBytes()).thenReturn(original);
+        when(documentService.loadForInvoice(5L)).thenReturn(content);
+
+        mvc.perform(get("/api/invoices/5/document").cookie(ownerCookie))
+                .andExpect(status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content().contentType("application/pdf"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.content().bytes(original))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                        .string("Content-Disposition", org.hamcrest.Matchers.startsWith("inline")))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                        .string("X-Content-Type-Options", "nosniff"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                        .string("Cache-Control", org.hamcrest.Matchers.containsString("no-store")));
+        mvc.perform(get("/api/invoices/5/document").cookie(otherCookie)).andExpect(status().isNotFound());
+        org.mockito.Mockito.verify(documentService, org.mockito.Mockito.times(1)).loadForInvoice(5L);
     }
 
     @Test

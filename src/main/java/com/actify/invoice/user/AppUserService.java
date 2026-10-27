@@ -63,9 +63,15 @@ public class AppUserService {
         if (normalizedEmail.isEmpty() || normalizedEmail.length() > MAX_EMAIL_LENGTH || !EMAIL.matcher(normalizedEmail).matches()) {
             errors.add(new FieldErrorDto("email", "email must be a valid email address"));
         }
+        // Optional: when left blank it defaults to the e-mail before the "@" - the name the UI shows anyway.
         String name = displayName == null ? "" : displayName.trim();
+        if (name.isEmpty()) {
+            String fromEmail = UserNames.fromEmail(normalizedEmail);
+            name = fromEmail == null ? "" : fromEmail;
+        }
         if (name.isEmpty() || name.length() > MAX_DISPLAY_NAME_LENGTH) {
-            errors.add(new FieldErrorDto("displayName", "displayName is required (1-" + MAX_DISPLAY_NAME_LENGTH + " characters)"));
+            errors.add(new FieldErrorDto("displayName", "displayName must be 1-" + MAX_DISPLAY_NAME_LENGTH
+                    + " characters (leave it blank to use the e-mail before the \"@\")"));
         }
         if (role == null) {
             errors.add(new FieldErrorDto("role", "role is required (ADMIN, VENDOR or REVIEWER)"));
@@ -104,6 +110,28 @@ public class AppUserService {
         user.setRole(newRole);
         user.bumpTokenVersion(); // tokens issued with the old role stop working immediately
         log.info("User {} role changed to {}", userId, newRole);
+        return user;
+    }
+
+    /**
+     * Renames a user (the label shown everywhere, see UserNames.label). Blank = back to the e-mail before the "@".
+     * Same 1-100 character rule as createUser; login, role and tokens are untouched.
+     */
+    @Transactional
+    public AppUser changeDisplayName(Long userId, String displayName) {
+        AppUser user = find(userId);
+        String name = displayName == null ? "" : displayName.trim();
+        if (name.isEmpty()) {
+            String fromEmail = UserNames.fromEmail(user.getEmail());
+            name = fromEmail == null ? "" : fromEmail;
+        }
+        if (name.isEmpty() || name.length() > MAX_DISPLAY_NAME_LENGTH) {
+            throw new InvalidRequestException("displayName must be 1-" + MAX_DISPLAY_NAME_LENGTH + " characters",
+                    java.util.Collections.singletonList(new FieldErrorDto("displayName", "displayName must be 1-"
+                            + MAX_DISPLAY_NAME_LENGTH + " characters (leave it blank to use the e-mail before the \"@\")")));
+        }
+        user.setDisplayName(name);
+        log.info("User {} display name changed", userId);
         return user;
     }
 

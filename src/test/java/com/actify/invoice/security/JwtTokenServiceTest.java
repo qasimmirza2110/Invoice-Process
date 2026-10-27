@@ -12,7 +12,19 @@ import java.util.Base64;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * The login token itself: which claims it carries, that expiry, foreign keys and bad secrets are refused, and that the
+ * application identity (issuer, audience, cookie name) is exactly the one documented for frontends.
+ */
 class JwtTokenServiceTest {
+
+    /** These values are part of the frontend/deployment contract (docs/REACT_BACKEND_HANDOFF.md); change them knowingly. */
+    @Test
+    void theApplicationIdentityIsActifyInvoiceProcess() {
+        assertThat(JwtTokenService.ISSUER).isEqualTo("actify-invoice-process");
+        assertThat(JwtTokenService.AUDIENCE).isEqualTo("actify-invoice-process-web");
+        assertThat(AuthCookies.AUTH_COOKIE).isEqualTo("INVOICE_PROCESS_AUTH");
+    }
 
     @Test
     void tokenCarriesOnlyIdentityClaimsNotTheRole() {
@@ -56,5 +68,22 @@ class JwtTokenServiceTest {
                 .hasMessageContaining("too short").hasMessageNotContaining(shortSecret);
         assertThatThrownBy(() -> new JwtTokenService("%%%not-base64%%%", 30))
                 .hasMessageContaining("not valid Base64").hasMessageNotContaining("%%%not-base64%%%");
+    }
+
+    @Test
+    void localDemoMayUseARandomKeyForOneRunWhenNoSecretIsSet() {
+        JwtTokenService first = new JwtTokenService("", 30, true);
+        JwtTokenService second = new JwtTokenService("", 30, true);
+        String token = first.issue(TestLogins.user(5, Role.REVIEWER));
+
+        assertThat(first.decode(token).getSubject()).isEqualTo("5");
+        // A new run gets a new key, so an old login cookie is no longer valid.
+        assertThatThrownBy(() -> second.decode(token)).isInstanceOf(JwtException.class);
+    }
+
+    @Test
+    void theRandomKeyNeverHidesAConfiguredButBrokenSecret() {
+        assertThatThrownBy(() -> new JwtTokenService("%%%not-base64%%%", 30, true)).hasMessageContaining("not valid Base64");
+        assertThatThrownBy(() -> new JwtTokenService("", 30, false)).hasMessageContaining("not set");
     }
 }

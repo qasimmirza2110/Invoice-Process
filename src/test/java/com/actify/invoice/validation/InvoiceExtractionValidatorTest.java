@@ -11,6 +11,11 @@ import java.util.Arrays;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * The deterministic arithmetic and format checks applied to every extraction: totals, line totals, shipping and
+ * discount handling, negative values, missing critical fields, the one-cent rounding tolerance, and that every problem
+ * carries a machine-readable reason code.
+ */
 class InvoiceExtractionValidatorTest {
 
     private final InvoiceExtractionValidator validator = new InvoiceExtractionValidator();

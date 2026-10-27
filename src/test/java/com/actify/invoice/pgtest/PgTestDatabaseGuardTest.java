@@ -20,7 +20,7 @@ import static org.mockito.Mockito.when;
 class PgTestDatabaseGuardTest {
 
     private static final String TEST_URL = "jdbc:postgresql://localhost:5432/" + PgTestDatabaseGuard.TEST_DATABASE;
-    private static final String LIVE_DB = "Actify-Internship-Task-8-Invoice-LLM-Extraction_db";
+    private static final String LIVE_DB = "Actify-Internship-Invoice-Process_db";
 
     private PgTestDatabaseGuard guard(String url, String... profiles) {
         MockEnvironment env = new MockEnvironment().withProperty("spring.datasource.url", url);

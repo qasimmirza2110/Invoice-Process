@@ -7,6 +7,11 @@ import org.springframework.web.client.RestTemplate;
 
 import java.time.Duration;
 
+/**
+ * The shared RestTemplate used for outgoing HTTP calls - in practice only the Gemini API (GeminiInvoiceExtractor).
+ * It exists to put explicit connect/read timeouts on those calls; without them one stuck provider request could
+ * block a worker or request thread indefinitely.
+ */
 @Configuration
 public class RestTemplateConfig {
 

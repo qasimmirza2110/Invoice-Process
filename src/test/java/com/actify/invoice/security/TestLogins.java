@@ -11,7 +11,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * Builds real login cookies for MockMvc tests: a user that the (mocked) repository will return, and a
- * TASK8_AUTH cookie signed by the real JwtTokenService - so the real JwtCookieAuthenticationFilter runs.
+ * INVOICE_PROCESS_AUTH cookie signed by the real JwtTokenService - so the real JwtCookieAuthenticationFilter runs.
  */
 public final class TestLogins {
 

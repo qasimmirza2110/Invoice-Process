@@ -22,7 +22,7 @@ import org.springframework.web.context.WebApplicationContext;
 import com.actify.invoice.repository.InvoiceRepository;
 import com.actify.invoice.security.JwtTokenService;
 import com.actify.invoice.security.TestLogins;
-import com.actify.invoice.security.WithTask8WebSecurity;
+import com.actify.invoice.security.WithInvoiceWebSecurity;
 import com.actify.invoice.user.AppUserRepository;
 import com.actify.invoice.user.Role;
 import org.junit.jupiter.api.BeforeEach;
@@ -52,7 +52,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * (which ignores unknown properties by default - these tests prove they still reach the service).
  */
 @WebMvcTest(InvoiceVersionController.class)
-@WithTask8WebSecurity
+@WithInvoiceWebSecurity
 class InvoiceVersionControllerTest {
 
     @Autowired

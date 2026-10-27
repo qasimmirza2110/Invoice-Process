@@ -56,6 +56,12 @@ public class AdminUserController {
         return UserResponse.from(userService.changeRole(id, body.getRole()));
     }
 
+    /** ADMIN only (/api/admin/**). Body {"displayName":"Sam"}; blank = the e-mail before the "@". */
+    @PutMapping(value = "/{id}/display-name", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public UserResponse changeDisplayName(@PathVariable Long id, @RequestBody UserUpdateRequest body) {
+        return UserResponse.from(userService.changeDisplayName(id, body.getDisplayName()));
+    }
+
     @PutMapping(value = "/{id}/enabled", consumes = MediaType.APPLICATION_JSON_VALUE)
     public UserResponse setEnabled(@PathVariable Long id, @RequestBody UserUpdateRequest body) {
         if (body.getEnabled() == null) {

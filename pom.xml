@@ -9,10 +9,10 @@
 		<relativePath/> <!-- lookup parent from repository -->
 	</parent>
 	<groupId>com.actify</groupId>
-	<artifactId>task-8-invoice-llm-extraction</artifactId>
+	<artifactId>actify-invoice-process</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
-	<name>Invoice Process</name>
-	<description>Invoice PDF -> Gemini -> JSON -> Java validation -> PostgreSQL</description>
+	<name>Actify Invoice Process</name>
+	<description>API-only backend: invoice PDF -> Gemini -> JSON -> Java validation -> human review -> PostgreSQL</description>
 
 	<properties>
 		<java.version>1.8</java.version>
@@ -95,7 +95,7 @@
 
 	<profiles>
 		<!-- mvnw test -Ppgtest : also runs the PostgreSQL integration tests against
-		     Actify-Internship-Task-8-Invoice-LLM-Extraction_test_db (never the live database;
+		     Actify-Internship-Invoice-Process_test_db (never the live database;
 		     PgTestDatabaseGuard refuses to start otherwise). -->
 		<profile>
 			<id>pgtest</id>

@@ -28,8 +28,17 @@ public enum ReviewReasonCode {
     AMOUNT_PRECISION,
     /** More line items than the correction form accepts (200). */
     TOO_MANY_ITEMS,
-    /** The same PDF bytes (SHA-256) were already uploaded by another vendor. */
+    /** The same vendor already uploaded these exact PDF bytes (SHA-256) for another invoice. */
     DUPLICATE_FILE,
-    /** Another invoice has the same seller name and invoice number. */
-    DUPLICATE_INVOICE_NO
+    /** The same vendor already has an invoice with the same seller and invoice number (DuplicateInvoiceFinder). */
+    DUPLICATE_INVOICE_NO;
+
+    /**
+     * Set of codes a VENDOR may see: all of them. Both duplicate reasons are computed ONLY against the vendor's own
+     * invoices (never across vendors), so they reveal nothing about anyone else. Kept as a method so callers keep a
+     * single place to narrow it again if a cross-invoice reason is ever added.
+     */
+    public static java.util.Set<ReviewReasonCode> visibleToVendor() {
+        return java.util.Collections.unmodifiableSet(java.util.EnumSet.allOf(ReviewReasonCode.class));
+    }
 }

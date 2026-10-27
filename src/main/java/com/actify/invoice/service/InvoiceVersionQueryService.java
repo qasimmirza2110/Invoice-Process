@@ -8,12 +8,15 @@ import com.actify.invoice.exception.InvoiceNotFoundException;
 import com.actify.invoice.exception.VersionNotFoundException;
 import com.actify.invoice.repository.InvoiceRepository;
 import com.actify.invoice.repository.InvoiceVersionRepository;
+import com.actify.invoice.user.UserNames;
 import com.actify.invoice.versioning.InvoiceSnapshotMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 /** Read-only access to the stored version history. Always reads invoice_versions, never the current invoice row. */
 @Service
@@ -23,26 +26,36 @@ public class InvoiceVersionQueryService {
     private final InvoiceRepository invoiceRepository;
     private final InvoiceVersionRepository versionRepository;
     private final InvoiceSnapshotMapper snapshotMapper;
+    private final UserNames userNames;
 
     public InvoiceVersionQueryService(InvoiceRepository invoiceRepository, InvoiceVersionRepository versionRepository,
-                                      InvoiceSnapshotMapper snapshotMapper) {
+                                      InvoiceSnapshotMapper snapshotMapper, UserNames userNames) {
         this.invoiceRepository = invoiceRepository;
         this.versionRepository = versionRepository;
         this.snapshotMapper = snapshotMapper;
+        this.userNames = userNames;
     }
 
     /** Newest first, without the full snapshots. An invoice with no history gives an empty list. */
     public List<InvoiceVersionResponse> listVersions(Long invoiceId) {
         requireInvoice(invoiceId);
+        List<InvoiceVersion> versions = versionRepository.findByInvoice_IdOrderByVersionNumberDesc(invoiceId);
+        List<Long> editorIds = new ArrayList<>();
+        for (InvoiceVersion version : versions) {
+            editorIds.add(UserNames.idFromActorLabel(version.getChangedBy()));
+        }
+        Map<Long, String> names = userNames.namesById(editorIds);
         List<InvoiceVersionResponse> result = new ArrayList<>();
-        for (InvoiceVersion version : versionRepository.findByInvoice_IdOrderByVersionNumberDesc(invoiceId)) {
-            result.add(toResponse(invoiceId, version, false));
+        for (InvoiceVersion version : versions) {
+            result.add(toResponse(invoiceId, version, false, names));
         }
         return result;
     }
 
     public InvoiceVersionResponse getVersion(Long invoiceId, int versionNumber) {
-        return toResponse(invoiceId, find(invoiceId, versionNumber), true);
+        InvoiceVersion version = find(invoiceId, versionNumber);
+        Long editorId = UserNames.idFromActorLabel(version.getChangedBy());
+        return toResponse(invoiceId, version, true, userNames.namesById(Collections.singletonList(editorId)));
     }
 
     public VersionComparisonResponse compare(Long invoiceId, int fromVersion, int toVersion) {
@@ -65,9 +78,10 @@ public class InvoiceVersionQueryService {
         }
     }
 
-    private InvoiceVersionResponse toResponse(Long invoiceId, InvoiceVersion v, boolean withSnapshot) {
+    private InvoiceVersionResponse toResponse(Long invoiceId, InvoiceVersion v, boolean withSnapshot,
+                                              Map<Long, String> editorNames) {
         return new InvoiceVersionResponse(invoiceId, v.getVersionNumber(), v.getChangeSource(), v.getChangeReason(),
-                v.getChangedBy(), v.getCreatedAt(), SourceDocumentDto.fromEntity(v.getSourceDocument()),
+                v.getChangedBy(), UserNames.nameOrUnknown(editorNames, UserNames.idFromActorLabel(v.getChangedBy())), v.getCreatedAt(), SourceDocumentDto.fromEntity(v.getSourceDocument()),
                 snapshotMapper.changesFromJson(v.getChangedFields()),
                 withSnapshot ? snapshotMapper.snapshotFromJson(v.getSnapshotData()) : null);
     }

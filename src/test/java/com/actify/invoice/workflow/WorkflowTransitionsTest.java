@@ -17,6 +17,10 @@ import static com.actify.invoice.entity.InvoiceStatus.QUEUED;
 import static com.actify.invoice.entity.InvoiceStatus.REJECTED;
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * The invoice status machine: exactly the documented status moves are allowed (nothing else), and every status name
+ * fits the 20-character status column.
+ */
 class WorkflowTransitionsTest {
 
     @Test

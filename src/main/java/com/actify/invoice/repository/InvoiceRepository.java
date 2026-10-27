@@ -11,6 +11,11 @@ import javax.persistence.LockModeType;
 import java.util.List;
 import java.util.Optional;
 
+/**
+ * Invoices: reads for lists and detail pages, plus the row lock every correction takes first. The owner-scoped
+ * duplicate queries never compare one vendor's invoices with another vendor's, so a vendor learns nothing about
+ * other vendors' uploads. Search filters are built as Specifications in InvoiceListService.
+ */
 public interface InvoiceRepository extends JpaRepository<Invoice, Long>, JpaSpecificationExecutor<Invoice> {
 
     /**
@@ -30,17 +35,18 @@ public interface InvoiceRepository extends JpaRepository<Invoice, Long>, JpaSpec
     @Query("select count(i) from Invoice i where i.ownerUserId = :ownerId and i.sourceDocument.sha256 = :sha256")
     long countByOwnerAndSha256(@Param("ownerId") Long ownerId, @Param("sha256") String sha256);
 
-    /** Same PDF bytes on another invoice (another vendor or a legacy invoice)? -> DUPLICATE_FILE review reason. */
-    @Query("select count(i) from Invoice i where i.id <> :invoiceId and i.sourceDocument.sha256 = :sha256")
-    long countOtherInvoicesWithSha256(@Param("invoiceId") Long invoiceId, @Param("sha256") String sha256);
+    /** Same PDF bytes on ANOTHER invoice of the SAME owner? -> DUPLICATE_FILE review reason (never across vendors). */
+    @Query("select count(i) from Invoice i where i.ownerUserId = :ownerId and i.id <> :invoiceId "
+            + "and i.sourceDocument.sha256 = :sha256")
+    long countOtherOwnInvoicesWithSha256(@Param("ownerId") Long ownerId, @Param("invoiceId") Long invoiceId,
+                                         @Param("sha256") String sha256);
 
     /**
-     * Same seller + invoice number on another (not failed) invoice? -> DUPLICATE_INVOICE_NO review reason.
-     * An invoice number alone is not unique across sellers, so both are compared.
+     * The same owner's other invoices that already have an invoice number and still count (not FAILED / REJECTED),
+     * oldest first. DuplicateInvoiceFinder compares normalized number + seller in Java.
      */
-    @Query("select count(i) from Invoice i where i.id <> :invoiceId and i.invoiceNumber = :invoiceNumber "
-            + "and lower(i.sellerName) = lower(:sellerName) and i.status <> com.actify.invoice.entity.InvoiceStatus.FAILED")
-    long countOtherInvoicesWithSellerAndNumber(@Param("invoiceId") Long invoiceId,
-                                               @Param("sellerName") String sellerName,
-                                               @Param("invoiceNumber") String invoiceNumber);
+    @Query("select i from Invoice i where i.ownerUserId = :ownerId and i.id <> :invoiceId and i.invoiceNumber is not null "
+            + "and i.status not in (com.actify.invoice.entity.InvoiceStatus.FAILED, com.actify.invoice.entity.InvoiceStatus.REJECTED) "
+            + "order by i.id")
+    List<Invoice> findDuplicateCandidates(@Param("ownerId") Long ownerId, @Param("invoiceId") Long invoiceId);
 }

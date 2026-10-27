@@ -13,6 +13,10 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Values that do not fit the database columns are left empty and flagged - never silently truncated or rounded - and
+ * more line items than the correction form accepts are still stored but flagged for review.
+ */
 class StorableValuesTest {
 
     @Test

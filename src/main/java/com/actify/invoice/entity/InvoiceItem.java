@@ -11,6 +11,12 @@ import javax.persistence.ManyToOne;
 import javax.persistence.Table;
 import java.math.BigDecimal;
 
+/**
+ * One line item of an invoice (description, quantity, unit price, tax rate, line total), stored in invoice_items
+ * and owned by its Invoice. A correction always sends the complete item list; InvoiceEditService matches rows by
+ * position (updates existing rows, adds or removes the difference). Earlier lists remain visible in the invoice's
+ * version snapshots.
+ */
 @Entity
 @Table(name = "invoice_items")
 public class InvoiceItem {

@@ -20,6 +20,11 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * User management rules: normalized e-mails, BCrypt hashes only, the 12-72 byte password rule (bytes, not characters;
+ * never truncated), display-name rules, duplicate e-mail conflicts, token-version raises on role change / disable /
+ * "log out everywhere", and that the last enabled admin can never be disabled or demoted.
+ */
 @ExtendWith(MockitoExtension.class)
 class AppUserServiceTest {
 
@@ -85,10 +90,49 @@ class AppUserServiceTest {
 
     @Test
     void shortPasswordBadEmailMissingNameAndRoleAreAllReportedTogether() {
-        assertThatThrownBy(() -> service.createUser("not-an-email", " ", null, "short"))
+        assertThatThrownBy(() -> service.createUser("", " ", null, "short"))
                 .isInstanceOf(InvalidRequestException.class)
                 .satisfies(e -> assertThat(((InvalidRequestException) e).getFieldErrors())
                         .extracting("field").containsExactly("email", "displayName", "role", "password"));
+    }
+
+    @Test
+    void blankDisplayNameDefaultsToTheEmailBeforeTheAt() {
+        when(repository.save(any(AppUser.class))).thenAnswer(inv -> inv.getArgument(0));
+        AppUser user = service.createUser("Alex@example.test", "  ", Role.REVIEWER, "a-long-enough-password");
+        assertThat(user.getDisplayName()).isEqualTo("alex");
+        assertThat(user.getName()).isEqualTo("alex");
+    }
+
+    @Test
+    void tooLongDisplayNameIsStillRejected() {
+        char[] longName = new char[101];
+        java.util.Arrays.fill(longName, 'x');
+        assertThatThrownBy(() -> service.createUser("x@example.test", new String(longName), Role.VENDOR,
+                "a-long-enough-password"))
+                .isInstanceOf(InvalidRequestException.class)
+                .satisfies(e -> assertThat(((InvalidRequestException) e).getFieldErrors())
+                        .extracting("field").containsExactly("displayName"));
+    }
+
+    @Test
+    void anAdminCanRenameAUserBlankMeansTheEmailNameAndTokensStayValid() {
+        AppUser admin = new AppUser("admin@example.test", "Administrator", "hash", Role.ADMIN);
+        admin.setIdForTest(1L);
+        when(repository.findById(1L)).thenReturn(Optional.of(admin));
+
+        service.changeDisplayName(1L, "  Actify Admin  ");
+        assertThat(admin.getDisplayName()).isEqualTo("Actify Admin");
+        assertThat(admin.getName()).isEqualTo("Actify Admin");
+        assertThat(admin.getTokenVersion()).isZero(); // a rename does not log anyone out
+
+        service.changeDisplayName(1L, " ");
+        assertThat(admin.getName()).isEqualTo("admin");
+
+        char[] longName = new char[101];
+        java.util.Arrays.fill(longName, 'x');
+        assertThatThrownBy(() -> service.changeDisplayName(1L, new String(longName)))
+                .isInstanceOf(InvalidRequestException.class);
     }
 
     @Test

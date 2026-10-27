@@ -1,0 +1,1529 @@
+{
+  "info": {
+    "name": "Invoice Process - API Verification",
+    "description": "Actify Invoice Process - API verification collection (API-only backend; no web pages are served).\n\nNOT LIVE-TESTED: this collection was rewritten on 2026-10-27 from the source code and the automated tests; it has\nnot yet been run against a running application.\n\nAuthentication: \"00 - Login\" first. GET /api/health (public) obtains the readable XSRF-TOKEN cookie; POST\n/api/auth/login sets the HttpOnly INVOICE_PROCESS_AUTH cookie and ROTATES the XSRF token. A collection-level test\nscript copies the current XSRF-TOKEN cookie into the collection variable xsrfToken after EVERY response, and the\ncollection pre-request script sends it as X-XSRF-TOKEN on every POST/PUT/PATCH/DELETE. CSRF is never disabled.\nSet adminEmail / adminPassword in the environment (a TEST admin only - never a real person's account).\n\nSafety:\n- Read-only, safe to repeat: 00, 01, 05, 07, 11 and 10a/10-0/10f/10g/10h.\n- WRITES data (no Gemini call): 02 (creates a batch and stores a PDF), 04 (records rejected files on that batch),\n  08 (stores a second PDF and closes the batch), 10b (new invoice version). Run them manually against a demo or\n  test database only.\n- No request calls Gemini. Extraction happens only in the server's background worker, which is OFF unless the\n  server owner enables it (INVOICE_WORKER_ENABLED + GEMINI_API_KEY + limits). Enabling it is a separate, approved\n  step; folders 03 and 09 then show extraction results, otherwise the invoices simply stay QUEUED.\n- The legacy POST /api/invoices/extract endpoint is not used: it answers 409 in the local demo and on Render.\n\nFiles: the PDF fixtures (samples/*, postman/fixtures/*) are NOT in the repository. Provide your own SYNTHETIC files\nunder those names and set Postman Settings > General > Working directory to the project folder. oversized.pdf must\nbe larger than 10 MB. No Gemini key is needed or stored here: the backend owns it.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8088"
+    },
+    {
+      "key": "xsrfToken",
+      "value": ""
+    },
+    {
+      "key": "xsrfBeforeLogin",
+      "value": ""
+    },
+    {
+      "key": "batchId",
+      "value": ""
+    },
+    {
+      "key": "invoiceId",
+      "value": ""
+    },
+    {
+      "key": "multipageInvoiceId",
+      "value": ""
+    },
+    {
+      "key": "unknownInvoiceId",
+      "value": "999999999"
+    },
+    {
+      "key": "legacyInvoiceId",
+      "value": ""
+    },
+    {
+      "key": "latestVersion",
+      "value": "1"
+    },
+    {
+      "key": "currentVersionBefore",
+      "value": ""
+    },
+    {
+      "key": "correctionBody",
+      "value": ""
+    },
+    {
+      "key": "staleBody",
+      "value": ""
+    },
+    {
+      "key": "forbiddenFieldsBody",
+      "value": ""
+    },
+    {
+      "key": "wrongTotalBody",
+      "value": ""
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// CSRF: every unsafe request carries the CURRENT XSRF-TOKEN value as the X-XSRF-TOKEN header.",
+          "// xsrfToken is refreshed after every response (collection test script below), so the token rotated by",
+          "// login/logout is picked up automatically. The cookie jar value is the fallback.",
+          "const method = pm.request.method.toUpperCase();",
+          "if ([\"POST\", \"PUT\", \"PATCH\", \"DELETE\"].includes(method)) {",
+          "    const token = pm.collectionVariables.get(\"xsrfToken\") || pm.cookies.get(\"XSRF-TOKEN\");",
+          "    if (token) {",
+          "        pm.request.headers.upsert({ key: \"X-XSRF-TOKEN\", value: token });",
+          "    }",
+          "}"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Keep the CSRF header in step with the server: login and logout issue a NEW XSRF-TOKEN cookie.",
+          "const currentXsrf = pm.cookies.get(\"XSRF-TOKEN\");",
+          "if (currentXsrf) {",
+          "    pm.collectionVariables.set(\"xsrfToken\", currentXsrf);",
+          "}",
+          "pm.test(\"[security] No API key, auth header or stack trace in the response\", function () {",
+          "    const text = pm.response.text();",
+          "    pm.expect(text).to.not.match(/AIza[0-9A-Za-z_\\-]{20,}/);",
+          "    pm.expect(text.toLowerCase()).to.not.include(\"x-goog-api-key\");",
+          "    pm.expect(text).to.not.match(/\\bat (com|org|java)\\.[\\w.$]+\\(/);",
+          "    pm.expect(text).to.not.include(\"Exception:\");",
+          "});"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "00 - Login (run first; needs adminEmail/adminPassword in the environment)",
+      "description": "Run first. 1) GET /api/health (public) sets the readable XSRF-TOKEN cookie. 2) POST /api/auth/login (needs X-XSRF-TOKEN) sets the HttpOnly INVOICE_PROCESS_AUTH cookie (30 min) and a NEW XSRF-TOKEN; the token is never in a body. 3) GET /api/auth/me. Use a TEST admin only.",
+      "item": [
+        {
+          "name": "GET health (public; sets XSRF-TOKEN)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 200\", function () { pm.response.to.have.status(200); });",
+                  "pm.test(\"Health body is exactly {status: UP}\", function () { pm.expect(pm.response.json()).to.eql({ status: \"UP\" }); });",
+                  "pm.test(\"XSRF-TOKEN cookie is available before login\", function () { pm.expect(pm.cookies.has(\"XSRF-TOKEN\")).to.be.true; });",
+                  "pm.collectionVariables.set(\"xsrfBeforeLogin\", pm.cookies.get(\"XSRF-TOKEN\") || \"\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/health"
+          }
+        },
+        {
+          "name": "POST login (sets the HttpOnly auth cookie)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 200\", function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Logged in as ADMIN\", function () { pm.expect(body.role).to.eql(\"ADMIN\"); });",
+                  "pm.test(\"The token is never in the response body\", function () { pm.expect(body).to.not.have.property(\"token\"); });",
+                  "pm.test(\"Login cookie is HttpOnly and SameSite=Strict\", function () {",
+                  "    const setCookie = pm.response.headers.all().filter(h => h.key.toLowerCase() === \"set-cookie\")",
+                  "        .map(h => h.value).join(\"\\n\");",
+                  "    pm.expect(setCookie).to.include(\"INVOICE_PROCESS_AUTH=\");",
+                  "    pm.expect(setCookie).to.include(\"HttpOnly\");",
+                  "    pm.expect(setCookie).to.include(\"SameSite=Strict\");",
+                  "});",
+                  "// Login rotates the CSRF token. Save the NEW value now so the next write sends it (the collection test script",
+                  "// does the same after every response; this makes the login step explicit and testable).",
+                  "const rotated = pm.cookies.get(\"XSRF-TOKEN\");",
+                  "pm.test(\"Login issued a new XSRF-TOKEN\", function () {",
+                  "    pm.expect(rotated).to.be.a(\"string\").and.not.empty;",
+                  "    pm.expect(rotated).to.not.eql(pm.collectionVariables.get(\"xsrfBeforeLogin\"));",
+                  "});",
+                  "pm.collectionVariables.set(\"xsrfToken\", rotated || \"\");"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"{{adminEmail}}\",\"password\":\"{{adminPassword}}\"}"
+            },
+            "url": "{{baseUrl}}/api/auth/login"
+          }
+        },
+        {
+          "name": "GET who am I",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"Role comes from the server\", function () {",
+                  "    pm.expect(pm.response.json().role).to.eql(\"ADMIN\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/auth/me"
+          }
+        }
+      ]
+    },
+    {
+      "name": "01 - Health and read verification (read-only)",
+      "description": "GET /api/health is the public liveness check (no database). The role-scoped invoice list proves the login, JPA and PostgreSQL path. Safe to repeat.",
+      "item": [
+        {
+          "name": "GET health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 {status: UP}\", function () { pm.response.to.have.status(200); pm.expect(pm.response.json()).to.eql({ status: \"UP\" }); });",
+                  "pm.test(\"Not cached\", function () { pm.expect(pm.response.headers.get(\"Cache-Control\")).to.include(\"no-store\"); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/health"
+          }
+        },
+        {
+          "name": "GET invoice list (admin: workflow invoices)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 and a list of at most 5\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json()).to.be.an(\"array\").with.length.at.most(5);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/invoices?size=5"
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 - Batch upload (WRITES: batch + stored PDF; no Gemini call - run manually)",
+      "description": "The supported upload flow (VENDOR or ADMIN). Creates a batch and uploads samples/sample-invoice.pdf. The server stores the PDF privately and queues the invoice (status QUEUED); nothing calls Gemini here. Re-running uploads the same bytes again, which the server refuses as DUPLICATE_FILE (422) - both outcomes are accepted by the tests. Run against a demo or test database only.",
+      "item": [
+        {
+          "name": "POST create batch",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"201 Created\", function () { pm.response.to.have.status(201); });",
+                  "const b = pm.response.json();",
+                  "pm.test(\"An OPEN LOCAL batch\", function () {",
+                  "    pm.expect(b.status).to.eql(\"OPEN\");",
+                  "    pm.expect(b.source).to.eql(\"LOCAL\");",
+                  "    pm.expect(b.acceptedCount).to.eql(0);",
+                  "});",
+                  "pm.collectionVariables.set(\"batchId\", b.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"label\":\"Postman synthetic batch\",\"defaultCategoryCode\":null,\"source\":\"LOCAL\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/api/batches"
+          }
+        },
+        {
+          "name": "POST upload sample PDF",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"202 accepted, or 422 DUPLICATE_FILE on a repeat run\", function () { pm.expect(pm.response.code).to.be.oneOf([202, 422]); });",
+                  "const r = pm.response.json();",
+                  "if (pm.response.code === 202) {",
+                  "    pm.test(\"Accepted and QUEUED - waiting for the extraction worker\", function () {",
+                  "        pm.expect(r.accepted).to.eql(true);",
+                  "        pm.expect(r.status).to.eql(\"QUEUED\");",
+                  "        pm.expect(r.invoiceId).to.be.a(\"number\");",
+                  "    });",
+                  "    pm.collectionVariables.set(\"invoiceId\", r.invoiceId);",
+                  "} else {",
+                  "    pm.test(\"Repeat upload is refused, never stored twice\", function () {",
+                  "        pm.expect(r.accepted).to.eql(false);",
+                  "        pm.expect(r.code).to.eql(\"DUPLICATE_FILE\");",
+                  "    });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "samples/sample-invoice.pdf"
+                }
+              ]
+            },
+            "url": "{{baseUrl}}/api/batches/{{batchId}}/files"
+          }
+        },
+        {
+          "name": "GET batch detail",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200\", function () { pm.response.to.have.status(200); });",
+                  "const d = pm.response.json();",
+                  "pm.test(\"Batch detail shape\", function () {",
+                  "    pm.expect(String(d.batch.id)).to.eql(String(pm.collectionVariables.get(\"batchId\")));",
+                  "    pm.expect(d.invoices).to.be.an(\"array\");",
+                  "    pm.expect(d.rejections).to.be.an(\"array\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/batches/{{batchId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 - Invoice retrieval (read-only)",
+      "description": "Reads {{invoiceId}} accepted by folder 02. Status is QUEUED until the server's extraction worker runs (it is off by default); after a successful extraction it is NEEDS_REVIEW. No Gemini call.",
+      "item": [
+        {
+          "name": "GET invoice by id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200\", function () { pm.response.to.have.status(200); });",
+                  "const inv = pm.response.json();",
+                  "pm.test(\"The requested workflow invoice\", function () {",
+                  "    pm.expect(String(inv.id)).to.eql(String(pm.collectionVariables.get(\"invoiceId\")));",
+                  "    pm.expect(inv.workflow.legacy).to.eql(false);",
+                  "    pm.expect(inv.status).to.be.oneOf([\"QUEUED\", \"PROCESSING\", \"NEEDS_REVIEW\", \"PENDING_APPROVAL\", \"APPROVED\", \"REJECTED\", \"FAILED\"]);",
+                  "});",
+                  "pm.test(\"The stored original is referenced with its SHA-256\", function () {",
+                  "    pm.expect(inv.sourceDocument.sha256).to.match(/^[0-9a-f]{64}$/);",
+                  "    pm.expect(inv.sourceDocument.contentType).to.eql(\"application/pdf\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/invoices/{{invoiceId}}"
+          }
+        },
+        {
+          "name": "GET original PDF",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 application/pdf\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/pdf\");",
+                  "});",
+                  "pm.test(\"nosniff and no-store\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"X-Content-Type-Options\")).to.include(\"nosniff\");",
+                  "    pm.expect(pm.response.headers.get(\"Cache-Control\")).to.include(\"no-store\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/pdf"
+              }
+            ],
+            "url": "{{baseUrl}}/api/invoices/{{invoiceId}}/document"
+          }
+        },
+        {
+          "name": "GET status history",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 and a list\", function () { pm.response.to.have.status(200); pm.expect(pm.response.json()).to.be.an(\"array\"); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/invoices/{{invoiceId}}/events"
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 - Upload validation (records rejections on the folder-02 batch; no Gemini)",
+      "description": "Invalid files sent to the batch from folder 02. File-rule failures are answered 422 with a FileIntakeResponse and are recorded on the batch (rejectedCount). A missing file part and a file over the 10 MB multipart limit are refused earlier with 400 and the standard error body. Requires folder 02 first.",
+      "item": [
+        {
+          "name": "Missing file part",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400\", function () { pm.response.to.have.status(400); });",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Standard error body\", function () {",
+                  "    pm.expect(body).to.include.all.keys(\"timestamp\", \"status\", \"error\", \"message\", \"path\");",
+                  "    pm.expect(body).to.not.have.any.keys(\"trace\", \"exception\");",
+                  "});",
+                  "pm.test(\"Error title is 'Bad request'\", function () { pm.expect(body.error).to.eql(\"Bad request\"); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "note",
+                  "type": "text",
+                  "value": "no file attached"
+                }
+              ]
+            },
+            "url": "{{baseUrl}}/api/batches/{{batchId}}/files"
+          }
+        },
+        {
+          "name": "Empty file",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"422 - rejected by the intake rules (recorded on the batch)\", function () { pm.response.to.have.status(422); });",
+                  "const r = pm.response.json();",
+                  "pm.test(\"FileIntakeResponse: not accepted, code INVALID_FILE\", function () {",
+                  "    pm.expect(r.accepted).to.eql(false);",
+                  "    pm.expect(r.invoiceId).to.eql(null);",
+                  "    pm.expect(r.code).to.eql(\"INVALID_FILE\");",
+                  "    pm.expect(r.message).to.include(\"empty\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "postman/fixtures/empty.pdf"
+                }
+              ]
+            },
+            "url": "{{baseUrl}}/api/batches/{{batchId}}/files"
+          }
+        },
+        {
+          "name": "Wrong extension (.txt)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"422 - rejected by the intake rules (recorded on the batch)\", function () { pm.response.to.have.status(422); });",
+                  "const r = pm.response.json();",
+                  "pm.test(\"FileIntakeResponse: not accepted, code INVALID_FILE\", function () {",
+                  "    pm.expect(r.accepted).to.eql(false);",
+                  "    pm.expect(r.invoiceId).to.eql(null);",
+                  "    pm.expect(r.code).to.eql(\"INVALID_FILE\");",
+                  "    pm.expect(r.message).to.include(\"Only .pdf files are accepted\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "postman/fixtures/invoice.txt"
+                }
+              ]
+            },
+            "url": "{{baseUrl}}/api/batches/{{batchId}}/files"
+          }
+        },
+        {
+          "name": "Invalid PDF signature",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"422 - rejected by the intake rules (recorded on the batch)\", function () { pm.response.to.have.status(422); });",
+                  "const r = pm.response.json();",
+                  "pm.test(\"FileIntakeResponse: not accepted, code INVALID_FILE\", function () {",
+                  "    pm.expect(r.accepted).to.eql(false);",
+                  "    pm.expect(r.invoiceId).to.eql(null);",
+                  "    pm.expect(r.code).to.eql(\"INVALID_FILE\");",
+                  "    pm.expect(r.message).to.include(\"not a valid PDF\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "postman/fixtures/not-a-real-pdf.pdf"
+                }
+              ]
+            },
+            "url": "{{baseUrl}}/api/batches/{{batchId}}/files"
+          }
+        },
+        {
+          "name": "Oversized PDF (> 10 MB)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"400\", function () { pm.response.to.have.status(400); });",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Standard error body\", function () {",
+                  "    pm.expect(body).to.include.all.keys(\"timestamp\", \"status\", \"error\", \"message\", \"path\");",
+                  "    pm.expect(body).to.not.have.any.keys(\"trace\", \"exception\");",
+                  "});",
+                  "pm.test(\"Invalid invoice file - 10 MB limit\", function () {",
+                  "    pm.expect(body.error).to.eql(\"Invalid invoice file\");",
+                  "    pm.expect(body.message).to.include(\"10 MB\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "postman/fixtures/oversized.pdf"
+                }
+              ]
+            },
+            "url": "{{baseUrl}}/api/batches/{{batchId}}/files"
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 - FAIL - Resource Validation",
+      "description": "Read failures (admin login). No Gemini call, no database write. Safe to repeat.",
+      "item": [
+        {
+          "name": "Unknown invoice id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 404\", function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});",
+                  "pm.test(\"Response is JSON\", function () {",
+                  "    pm.response.to.be.json;",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Error body has the standard shape\", function () {",
+                  "    pm.expect(body).to.include.all.keys(\"timestamp\", \"status\", \"error\", \"message\", \"path\");",
+                  "    pm.expect(body.status).to.eql(404);",
+                  "    pm.expect(body.message).to.be.a(\"string\").and.not.empty;",
+                  "});",
+                  "pm.test(\"Error title is 'Invoice not found'\", function () {",
+                  "    pm.expect(body.error).to.eql(\"Invoice not found\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/invoices/{{unknownInvoiceId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "invoices",
+                "{{unknownInvoiceId}}"
+              ]
+            },
+            "description": "EXPECTED: 404 Invoice not found. GEMINI: no. DB: read. SAFE TO REPEAT: yes."
+          }
+        },
+        {
+          "name": "Malformed invoice id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"Response is JSON\", function () {",
+                  "    pm.response.to.be.json;",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Error body has the standard shape\", function () {",
+                  "    pm.expect(body).to.include.all.keys(\"timestamp\", \"status\", \"error\", \"message\", \"path\");",
+                  "    pm.expect(body.status).to.eql(400);",
+                  "    pm.expect(body.message).to.be.a(\"string\").and.not.empty;",
+                  "});",
+                  "pm.test(\"Error title is 'Bad request'\", function () {",
+                  "    pm.expect(body.error).to.eql(\"Bad request\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/invoices/abc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "invoices",
+                "abc"
+              ]
+            },
+            "description": "EXPECTED: 400 Bad request (id must be numeric). GEMINI: no. DB: none. SAFE TO REPEAT: yes."
+          }
+        }
+      ]
+    },
+    {
+      "name": "06 - Provider failure scenarios (verified by the automated tests, not from Postman)",
+      "description": "Gemini failures cannot be triggered from Postman without spending quota. They are covered by the offline JUnit suite with Gemini mocked (./mvnw -o test): GeminiInvoiceExtractorTest, InvoiceServiceImplTest, FailureClassifierTest, ExtractionWorkerDecisionTest and InvoiceControllerTest. In the batch workflow a provider failure never becomes an HTTP error: the invoice is retried (QUEUED) or ends FAILED with a failureReason. Never hammer Gemini to force a real 429.",
+      "item": []
+    },
+    {
+      "name": "07 - Security Verification",
+      "description": "Checks that client-supplied credentials and server internals are never reflected. Every request in the collection also runs the collection-level [security] test.",
+      "item": [
+        {
+          "name": "Auth header is not reflected",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 404\", function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});",
+                  "pm.test(\"Response is JSON\", function () {",
+                  "    pm.response.to.be.json;",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Error body has the standard shape\", function () {",
+                  "    pm.expect(body).to.include.all.keys(\"timestamp\", \"status\", \"error\", \"message\", \"path\");",
+                  "    pm.expect(body.status).to.eql(404);",
+                  "    pm.expect(body.message).to.be.a(\"string\").and.not.empty;",
+                  "});",
+                  "pm.test(\"Error title is 'Invoice not found'\", function () {",
+                  "    pm.expect(body.error).to.eql(\"Invoice not found\");",
+                  "});",
+                  "pm.test(\"Fake credentials are not reflected in body or headers\", function () {",
+                  "    const text = pm.response.text() + JSON.stringify(pm.response.headers.toObject());",
+                  "    pm.expect(text).to.not.include(\"fake-token-must-not-be-reflected\");",
+                  "    pm.expect(text).to.not.include(\"fake-gemini-key-must-not-be-reflected\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer fake-token-must-not-be-reflected"
+              },
+              {
+                "key": "x-goog-api-key",
+                "value": "fake-gemini-key-must-not-be-reflected"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/invoices/{{unknownInvoiceId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "invoices",
+                "{{unknownInvoiceId}}"
+              ]
+            },
+            "description": "WHAT: send a fake Authorization and x-goog-api-key header to an error endpoint.\nEXPECTED: 404 and neither value appears in the response body or headers. GEMINI: no. DB: read. SAFE TO REPEAT: yes."
+          }
+        },
+        {
+          "name": "Error response has no stack trace field",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 400\", function () {",
+                  "    pm.response.to.have.status(400);",
+                  "});",
+                  "pm.test(\"Response is JSON\", function () {",
+                  "    pm.response.to.be.json;",
+                  "});",
+                  "const body = pm.response.json();",
+                  "pm.test(\"Error body has the standard shape\", function () {",
+                  "    pm.expect(body).to.include.all.keys(\"timestamp\", \"status\", \"error\", \"message\", \"path\");",
+                  "    pm.expect(body.status).to.eql(400);",
+                  "    pm.expect(body.message).to.be.a(\"string\").and.not.empty;",
+                  "});",
+                  "pm.test(\"Error title is 'Bad request'\", function () {",
+                  "    pm.expect(body.error).to.eql(\"Bad request\");",
+                  "});",
+                  "pm.test(\"No trace/exception fields\", function () {",
+                  "    pm.expect(body).to.not.have.property(\"trace\");",
+                  "    pm.expect(body).to.not.have.property(\"exception\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/invoices/abc",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "invoices",
+                "abc"
+              ]
+            },
+            "description": "EXPECTED: 400 with only timestamp/status/error/message/path - no \"trace\" or \"exception\" fields. GEMINI: no. DB: none. SAFE TO REPEAT: yes."
+          }
+        }
+      ]
+    },
+    {
+      "name": "08 - Multi-page PDF upload (WRITES: stored PDF; no Gemini call - run manually)",
+      "description": "Uploads samples/sample-invoice-multipage-mixed.pdf (SYNTHETIC: page 1 text, page 2 a scanned-style image with the only USB-C Cable line) into the folder-02 batch, then closes the batch. The extraction itself happens only if the server owner has enabled the worker; folder 09 then checks the result.",
+      "item": [
+        {
+          "name": "POST upload multi-page PDF",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"202 accepted, or 422 DUPLICATE_FILE on a repeat run\", function () { pm.expect(pm.response.code).to.be.oneOf([202, 422]); });",
+                  "const r = pm.response.json();",
+                  "if (pm.response.code === 202) {",
+                  "    pm.test(\"Accepted and QUEUED\", function () { pm.expect(r.status).to.eql(\"QUEUED\"); });",
+                  "    pm.collectionVariables.set(\"multipageInvoiceId\", r.invoiceId);",
+                  "} else {",
+                  "    pm.test(\"Repeat upload refused as DUPLICATE_FILE\", function () { pm.expect(r.code).to.eql(\"DUPLICATE_FILE\"); });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "samples/sample-invoice-multipage-mixed.pdf"
+                }
+              ]
+            },
+            "url": "{{baseUrl}}/api/batches/{{batchId}}/files"
+          }
+        },
+        {
+          "name": "POST close batch",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 and CLOSED\", function () { pm.response.to.have.status(200); pm.expect(pm.response.json().status).to.eql(\"CLOSED\"); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/batches/{{batchId}}/close"
+          }
+        }
+      ]
+    },
+    {
+      "name": "09 - Multi-page invoice retrieval (read-only)",
+      "description": "Reads {{multipageInvoiceId}} from folder 08. The extraction checks run only once the invoice has been extracted (status NEEDS_REVIEW or later); while it is QUEUED they are reported as skipped, not passed.",
+      "item": [
+        {
+          "name": "GET multi-page invoice by id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200\", function () { pm.response.to.have.status(200); });",
+                  "const inv = pm.response.json();",
+                  "const extracted = [\"NEEDS_REVIEW\", \"PENDING_APPROVAL\", \"APPROVED\", \"REJECTED\"].includes(inv.status);",
+                  "const check = extracted ? pm.test : pm.test.skip;",
+                  "check(\"Header values of the synthetic invoice\", function () {",
+                  "    pm.expect(inv.invoiceNumber).to.eql(\"INV-2026-0042\");",
+                  "    pm.expect(inv.invoiceDate).to.eql(\"2026-10-06\");",
+                  "    pm.expect(inv.currency).to.eql(\"INR\");",
+                  "    pm.expect(inv.subtotal).to.eql(10500);",
+                  "    pm.expect(inv.taxAmount).to.eql(1890);",
+                  "    pm.expect(inv.totalAmount).to.eql(12390);",
+                  "});",
+                  "check(\"Exactly two line items (page 1 + page 2)\", function () {",
+                  "    pm.expect(inv.items).to.have.lengthOf(2);",
+                  "    pm.expect(inv.items.map(i => i.description)).to.include.members([\"Laptop Stand\", \"USB-C Cable\"]);",
+                  "});",
+                  "pm.test(\"Status is a real workflow status (\" + inv.status + \")\", function () {",
+                  "    pm.expect(inv.status).to.be.oneOf([\"QUEUED\", \"PROCESSING\", \"NEEDS_REVIEW\", \"PENDING_APPROVAL\", \"APPROVED\", \"REJECTED\", \"FAILED\"]);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/invoices/{{multipageInvoiceId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "10 - Corrections & version history (no Gemini)",
+      "description": "Corrections and version history on {{legacyInvoiceId}} - an EXISTING legacy (single-file) invoice in status\nEXTRACTED. Set legacyInvoiceId by hand first. An ADMIN may correct only legacy invoices; workflow invoices are\ncorrected by their assigned REVIEWER (an admin gets 403) - that path is covered by the pgtest suite.\nRead-only: 10a, 10-0, 10f, 10g, 10h. Refused before any write: 10c (409), 10d (400), 10e (422).\nWRITES ONE NEW VERSION: 10b only - run it manually. 10-0 builds every correction body from the current invoice,\nso run 10-0 directly before 10b-10e. No request in this folder calls Gemini.",
+      "item": [
+        {
+          "name": "10a GET version history",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200 and a list\", function () { pm.response.to.have.status(200); pm.expect(pm.response.json()).to.be.an(\"array\"); });",
+                  "const list = pm.response.json();",
+                  "pm.test(\"Newest first, consecutive numbers\", function () {",
+                  "    list.forEach(function (v, i) { if (i > 0) { pm.expect(v.versionNumber).to.eql(list[i - 1].versionNumber - 1); } });",
+                  "});",
+                  "pm.test(\"No snapshots in the list; manual edits name their editor\", function () {",
+                  "    list.forEach(function (v) {",
+                  "        pm.expect(v).to.not.have.property(\"snapshot\");",
+                  "        if (v.changeSource === \"MANUAL_EDIT\") { pm.expect(v.changedBy).to.match(/^user:\\d+$/); }",
+                  "    });",
+                  "});",
+                  "if (list.length) { pm.collectionVariables.set(\"latestVersion\", list[0].versionNumber); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/invoices/{{legacyInvoiceId}}/versions"
+          }
+        },
+        {
+          "name": "10-0 GET legacy invoice and build correction bodies",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"200\", function () { pm.response.to.have.status(200); });",
+                  "const inv = pm.response.json();",
+                  "pm.test(\"A legacy invoice in EXTRACTED (the only kind an admin may correct)\", function () {",
+                  "    pm.expect(inv.workflow.legacy).to.eql(true);",
+                  "    pm.expect(inv.status).to.eql(\"EXTRACTED\");",
+                  "});",
+                  "const s = function (v) { return v === null || v === undefined ? null : String(v); };",
+                  "const base = function () {",
+                  "    return { baseVersion: inv.currentVersion, invoiceNumber: inv.invoiceNumber, invoiceDate: inv.invoiceDate,",
+                  "        sellerName: inv.sellerName, sellerTaxId: inv.sellerTaxId, buyerName: inv.buyerName, buyerTaxId: inv.buyerTaxId,",
+                  "        currency: inv.currency, subtotal: s(inv.subtotal), discountAmount: s(inv.discountAmount),",
+                  "        shippingAmount: s(inv.shippingAmount), taxAmount: s(inv.taxAmount), totalAmount: s(inv.totalAmount),",
+                  "        items: inv.items.map(function (i) { return { description: i.description, quantity: s(i.quantity),",
+                  "            unitPrice: s(i.unitPrice), taxRate: s(i.taxRate), lineTotal: s(i.lineTotal) }; }) };",
+                  "};",
+                  "pm.collectionVariables.set(\"currentVersionBefore\", inv.currentVersion);",
+                  "const ok = base(); ok.buyerName = (inv.buyerName || \"Buyer\") + \" (corrected via Postman)\"; ok.changeReason = \"Postman demo correction\";",
+                  "pm.collectionVariables.set(\"correctionBody\", JSON.stringify(ok));",
+                  "const stale = base(); stale.baseVersion = inv.currentVersion + 1000; stale.buyerName = \"must not be saved\";",
+                  "pm.collectionVariables.set(\"staleBody\", JSON.stringify(stale));",
+                  "const forbidden = base(); forbidden.id = 999999; forbidden.status = \"FAILED\"; forbidden.items.forEach(function (i) { i.invoiceId = 1; });",
+                  "pm.collectionVariables.set(\"forbiddenFieldsBody\", JSON.stringify(forbidden));",
+                  "const wrongTotal = base(); wrongTotal.totalAmount = \"0.01\";",
+                  "pm.collectionVariables.set(\"wrongTotalBody\", JSON.stringify(wrongTotal));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/invoices/{{legacyInvoiceId}}"
+          }
+        },
+        {
+          "name": "10b PUT correction (WRITES a new version - run manually)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200, changed, version increased', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    const r = pm.response.json();",
+                  "    pm.expect(r.changed).to.eql(true);",
+                  "    const before = Number(pm.collectionVariables.get('currentVersionBefore'));",
+                  "    pm.expect(r.invoice.currentVersion).to.eql(before === 0 ? 2 : before + 1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{correctionBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/api/invoices/{{legacyInvoiceId}}"
+          }
+        },
+        {
+          "name": "10c PUT stale baseVersion -> 409 (no write)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 Version conflict', function () {",
+                  "    pm.response.to.have.status(409);",
+                  "    pm.expect(pm.response.json().error).to.eql('Version conflict');",
+                  "    pm.expect(pm.response.json().message).to.include('Reload the latest version');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{staleBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/api/invoices/{{legacyInvoiceId}}"
+          }
+        },
+        {
+          "name": "10d PUT with non-editable fields -> 400 (no write)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 with fieldErrors naming the forbidden fields', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "    const fields = pm.response.json().fieldErrors.map(function (e) { return e.field; });",
+                  "    pm.expect(fields).to.include.members(['id', 'status']);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{forbiddenFieldsBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/api/invoices/{{legacyInvoiceId}}"
+          }
+        },
+        {
+          "name": "10e PUT with a wrong total -> 422 (no write)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422 with a totalAmount field error', function () {",
+                  "    pm.response.to.have.status(422);",
+                  "    const fields = pm.response.json().fieldErrors.map(function (e) { return e.field; });",
+                  "    pm.expect(fields).to.include('totalAmount');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{{wrongTotalBody}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": "{{baseUrl}}/api/invoices/{{legacyInvoiceId}}"
+          }
+        },
+        {
+          "name": "10f GET version 1 snapshot",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with a complete snapshot', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    const v = pm.response.json();",
+                  "    pm.expect(v.versionNumber).to.eql(1);",
+                  "    pm.expect(['LLM_EXTRACTION', 'LEGACY_BASELINE']).to.include(v.changeSource);",
+                  "    pm.expect(v.snapshot.invoiceNumber).to.be.a('string');",
+                  "    pm.expect(v.snapshot.items).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/invoices/{{legacyInvoiceId}}/versions/1"
+          }
+        },
+        {
+          "name": "10g GET compare version 1 -> latest",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with a differences list', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().differences).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/invoices/{{legacyInvoiceId}}/versions/compare?from=1&to={{latestVersion}}"
+          }
+        },
+        {
+          "name": "10h GET unknown document -> 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 Document not found', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "    pm.expect(pm.response.json().error).to.eql('Document not found');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/documents/00000000-0000-4000-8000-000000000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "11 - Multi-user workflow (read-only, no Gemini)",
+      "description": "GET requests only: safe to run any time after 00 - Login. Workflow writes (assign, submit, approve...) are covered by the automated pgtest suite against the TEST database.",
+      "item": [
+        {
+          "name": "GET invoice list (role-scoped)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"A list\", function () { pm.expect(pm.response.json()).to.be.an(\"array\"); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/invoices?size=20"
+          }
+        },
+        {
+          "name": "GET my batches",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"A list\", function () { pm.expect(pm.response.json()).to.be.an(\"array\"); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/batches"
+          }
+        },
+        {
+          "name": "GET active categories",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/categories"
+          }
+        },
+        {
+          "name": "GET users (ADMIN)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"No password hash is ever returned\", function () {",
+                  "    pm.expect(pm.response.text()).to.not.include(\"passwordHash\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/users"
+          }
+        },
+        {
+          "name": "GET queue and Gemini pacing status (ADMIN)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "pm.test(\"Pacing status present\", function () { pm.expect(pm.response.json()).to.have.property(\"quota\"); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/admin/queue/status"
+          }
+        },
+        {
+          "name": "GET admin dashboard (7 business days, Asia/Kolkata)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "const d = pm.response.json();",
+                  "pm.test(\"Business time zone is Asia/Kolkata\", function () { pm.expect(d.timeZone).to.eql(\"Asia/Kolkata\"); });",
+                  "pm.test(\"No invented accuracy number\", function () {",
+                  "    pm.expect(d.quality.accuracy.observedFieldMatchRate).to.be.null;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/api/dashboard/admin?days=7"
+          }
+        }
+      ]
+    }
+  ]
+}

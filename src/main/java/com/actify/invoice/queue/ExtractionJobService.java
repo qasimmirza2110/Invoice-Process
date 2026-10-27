@@ -15,7 +15,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Collections;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Short database transactions around the queue. The Gemini call itself is NEVER inside one of these:
@@ -31,16 +34,41 @@ public class ExtractionJobService {
     private final WorkflowService workflow;
     private final GeminiQuotaGuard quotaGuard;
     private final int staleClaimMinutes;
+    private final Set<Long> onlyInvoiceIds;
     private volatile String lastQuotaReason;
 
     public ExtractionJobService(ExtractionJobRepository jobRepository, InvoiceRepository invoiceRepository,
                                 WorkflowService workflow, GeminiQuotaGuard quotaGuard,
-                                @Value("${invoice.worker.stale-claim-minutes:10}") int staleClaimMinutes) {
+                                @Value("${invoice.worker.stale-claim-minutes:10}") int staleClaimMinutes,
+                                @Value("${invoice.worker.only-invoice-ids:}") String onlyInvoiceIds) {
         this.jobRepository = jobRepository;
         this.invoiceRepository = invoiceRepository;
         this.workflow = workflow;
         this.quotaGuard = quotaGuard;
         this.staleClaimMinutes = staleClaimMinutes;
+        this.onlyInvoiceIds = parseIds(onlyInvoiceIds);
+    }
+
+    /** "17, 18" -> {17, 18}; blank -> empty (= no restriction). A malformed list is refused at startup. */
+    static Set<Long> parseIds(String raw) {
+        Set<Long> ids = new TreeSet<>();
+        if (raw == null || raw.trim().isEmpty()) {
+            return Collections.unmodifiableSet(ids);
+        }
+        for (String part : raw.split(",")) {
+            try {
+                ids.add(Long.valueOf(part.trim()));
+            } catch (NumberFormatException e) {
+                throw new IllegalStateException("invoice.worker.only-invoice-ids (INVOICE_WORKER_ONLY_INVOICE_IDS) "
+                        + "must be a comma-separated list of invoice ids");
+            }
+        }
+        return Collections.unmodifiableSet(ids);
+    }
+
+    /** The invoices the worker is limited to; empty = every queued invoice (normal operation). */
+    public Set<Long> getOnlyInvoiceIds() {
+        return onlyInvoiceIds;
     }
 
     /**
@@ -62,7 +90,8 @@ public class ExtractionJobService {
         }
         lastQuotaReason = null;
         LocalDateTime now = LocalDateTime.now();
-        List<Long> ids = jobRepository.lockNextEligible(now);
+        List<Long> ids = onlyInvoiceIds.isEmpty() ? jobRepository.lockNextEligible(now)
+                : jobRepository.lockNextEligibleAmong(now, onlyInvoiceIds);
         if (ids.isEmpty()) {
             return null;
         }

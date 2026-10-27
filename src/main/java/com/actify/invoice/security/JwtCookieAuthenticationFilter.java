@@ -19,9 +19,9 @@ import java.io.IOException;
 import java.util.Collections;
 
 /**
- * Runs once per request: TASK8_AUTH cookie -> verified JWT -> user row from the database -> "logged in".
+ * Runs once per request: INVOICE_PROCESS_AUTH cookie -> verified JWT -> user row from the database -> "logged in".
  *
- *  1. No cookie (or a public page such as login.html): do nothing; the URL rules decide (usually 401).
+ *  1. No cookie (or a public endpoint such as POST /api/auth/login): do nothing; the URL rules decide (usually 401).
  *  2. Cookie present: JwtTokenService checks signature, expiry, issuer and audience.
  *  3. The user is re-read from app_users: it must exist, be enabled, and have the same token version as the
  *     token's "tv" claim. The ROLE comes from this row, never from the token or the browser.

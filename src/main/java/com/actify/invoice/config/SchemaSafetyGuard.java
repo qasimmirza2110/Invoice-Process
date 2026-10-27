@@ -1,15 +1,21 @@
 package com.actify.invoice.config;
 
+import com.actify.invoice.quota.QuotaSettings;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.context.EnvironmentAware;
 import org.springframework.core.Ordered;
 import org.springframework.core.PriorityOrdered;
+import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.EnumerablePropertySource;
 import org.springframework.core.env.Environment;
+import org.springframework.core.env.PropertySource;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -23,10 +29,15 @@ import java.util.Locale;
  * WHAT does it read? Only configuration (the Spring Environment). It never connects to a database.
  *
  * RULES
- *  1. The PostgreSQL test run (profile exactly "pgtest" AND the exact test database URL) is allowed, including
- *     ddl-auto=update. PgTestDatabaseGuard then double-checks current_database() before Hibernate runs.
- *  2. Every other start (Eclipse, mvnw spring-boot:run, java -jar) is refused unless the launch configuration
- *     sets INVOICE_LIVE_START_APPROVED=true AND INVOICE_APPROVED_DATABASE=host:port/database matching the JDBC URL.
+ *  1. The PostgreSQL test run (profile exactly "pgtest" AND exactly localhost:5432/<test database>) is allowed,
+ *     including ddl-auto=update. PgTestDatabaseGuard then double-checks current_database() before Hibernate runs.
+ *  1b. The local demo (profile exactly "localdemo") has its own, stricter rules - see checkLocalDemo. It never uses
+ *     the approval variables below and can only ever reach localhost:5432/invoice_process_local_demo_db.
+ *     application.properties makes "localdemo" the DEFAULT profile (spring.profiles.default), so a plain start with
+ *     no profile at all (Eclipse "Run As > Java Application") is a local-demo start and gets these same rules.
+ *  2. Every other start - one with an explicit other profile, e.g. -Dspring.profiles.active=live - is refused unless
+ *     the launch configuration sets INVOICE_LIVE_START_APPROVED=true AND INVOICE_APPROVED_DATABASE=host:port/database
+ *     matching the JDBC URL.
  *     Each start is approved for ONE named database (a scratch rehearsal copy, or later the live database) in its
  *     own approval gate.
  *  3. Even with that approval, no setting may let Hibernate or Spring change the schema: ddl-auto must be
@@ -39,10 +50,22 @@ import java.util.Locale;
 @Component
 public class SchemaSafetyGuard implements BeanFactoryPostProcessor, EnvironmentAware, PriorityOrdered {
 
-    public static final String TEST_DATABASE = "Actify-Internship-Task-8-Invoice-LLM-Extraction_test_db";
+    public static final String TEST_DATABASE = "Actify-Internship-Invoice-Process_test_db";
     public static final String TEST_PROFILE = "pgtest";
+    static final String TEST_ENDPOINT = "localhost:5432/" + TEST_DATABASE;
+    /** The real (live) database. The local demo refuses it by name, whatever else is configured. */
+    public static final String LIVE_DATABASE = "Actify-Internship-Invoice-Process_db";
+    public static final String LOCAL_DEMO_PROFILE = "localdemo";
+    public static final String LOCAL_DEMO_DATABASE = "invoice_process_local_demo_db";
+    static final String LOCAL_DEMO_ENDPOINT = "localhost:5432/" + LOCAL_DEMO_DATABASE;
     public static final String APPROVAL_PROPERTY = "invoice.live-start-approved";
     public static final String APPROVED_DATABASE_PROPERTY = "invoice.approved-database";
+    /** Explicit local-demo opt-in for real Gemini calls (INVOICE_LOCALDEMO_GEMINI_ENABLED). */
+    public static final String LOCAL_DEMO_GEMINI_PROPERTY = "invoice.localdemo.gemini-enabled";
+    public static final String WORKER_ONLY_INVOICE_IDS_PROPERTY = "invoice.worker.only-invoice-ids";
+    static final String OFFICIAL_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+    /** POST /api/invoices/extract (legacy single-file extraction). Disabled in the local demo. */
+    public static final String LEGACY_EXTRACT_PROPERTY = "invoice.legacy-extract.enabled";
 
     private Environment environment;
 
@@ -61,11 +84,126 @@ public class SchemaSafetyGuard implements BeanFactoryPostProcessor, EnvironmentA
         if (isIsolatedTestRun(env)) {
             return; // rule 1
         }
-        if (!"true".equalsIgnoreCase(env.getProperty(APPROVAL_PROPERTY, "false").trim())) {
-            throw refuse("starting against a non-test database is not approved. A database first needs a fresh, "
-                    + "restore-tested backup and the reviewed schema script; then the approved launch configuration sets "
-                    + "INVOICE_LIVE_START_APPROVED=true and INVOICE_APPROVED_DATABASE=host:port/database");
+        if (Arrays.asList(effectiveProfiles(env)).contains(LOCAL_DEMO_PROFILE)) {
+            checkLocalDemo(env); // rule 1b
+            return;
         }
+        if (!"true".equalsIgnoreCase(env.getProperty(APPROVAL_PROPERTY, "false").trim())) {
+            throw refuse("starting against a non-test database is not approved. For local work start WITHOUT a profile "
+                    + "(the local demo is the default) or use the 'Invoice Process - localdemo' launch configuration. "
+                    + "A real database first needs a fresh, restore-tested backup and the reviewed schema script; then "
+                    + "the approved launch configuration sets INVOICE_LIVE_START_APPROVED=true and "
+                    + "INVOICE_APPROVED_DATABASE=host:port/database");
+        }
+        requireNonMutatingSchemaSettings(env);
+        requireApprovedEndpoint(env);
+    }
+
+    /**
+     * Local demo: a separate, disposable database on this computer, never the live or the test database.
+     * Fail-closed on every point; nothing here needs (or accepts) the live-start approval variables.
+     * Messages never contain secret values - only property names and host:port/database.
+     */
+    static void checkLocalDemo(Environment env) {
+        if (!Arrays.equals(effectiveProfiles(env), new String[]{LOCAL_DEMO_PROFILE})) {
+            throw refuse("the local demo needs exactly one active profile, [" + LOCAL_DEMO_PROFILE + "], not "
+                    + Arrays.toString(effectiveProfiles(env)));
+        }
+        if ("true".equalsIgnoreCase(env.getProperty(APPROVAL_PROPERTY, "false").trim())
+                || !env.getProperty(APPROVED_DATABASE_PROPERTY, "").trim().isEmpty()) {
+            throw refuse("the local demo must not set INVOICE_LIVE_START_APPROVED or INVOICE_APPROVED_DATABASE; "
+                    + "remove them from the launch configuration (an approved non-demo start also needs an explicit "
+                    + "profile, e.g. -Dspring.profiles.active=live, because the local demo is the default profile)");
+        }
+        String actual = endpointOf(env.getProperty("spring.datasource.url", ""));
+        if (actual == null) {
+            throw refuse("spring.datasource.url is not a single-host jdbc:postgresql://host[:port]/database URL");
+        }
+        String database = actual.substring(actual.indexOf('/') + 1);
+        if (database.equalsIgnoreCase(LIVE_DATABASE) || database.equalsIgnoreCase(TEST_DATABASE)) {
+            throw refuse("the local demo may never use " + database + "; remove INVOICE_DB_URL / SPRING_DATASOURCE_URL "
+                    + "overrides from the launch configuration");
+        }
+        if (!actual.equals(LOCAL_DEMO_ENDPOINT)) {
+            throw refuse("the local demo datasource points at " + actual + " but only " + LOCAL_DEMO_ENDPOINT
+                    + " is allowed");
+        }
+        requireNonMutatingSchemaSettings(env);
+        checkLocalDemoGemini(env);
+    }
+
+    /**
+     * By default the local demo cannot call Gemini: no key (GEMINI_API_KEY would override the profile file) and no
+     * worker. INVOICE_LOCALDEMO_GEMINI_ENABLED=true is the explicit opt-in for a local extraction test; it still
+     * needs the key, may only send it to Google's official endpoint, and a running worker must be limited to named
+     * invoices (INVOICE_WORKER_ONLY_INVOICE_IDS) so the queued backlog is never processed by accident.
+     * The database rules above apply unchanged, so even with the opt-in only the local demo database is used.
+     */
+    static void checkLocalDemoGemini(Environment env) {
+        boolean hasKey = !env.getProperty("gemini.api-key", "").trim().isEmpty();
+        boolean worker = "true".equalsIgnoreCase(env.getProperty("invoice.worker.enabled", "false").trim());
+        if (!"true".equalsIgnoreCase(env.getProperty(LOCAL_DEMO_GEMINI_PROPERTY, "false").trim())) {
+            if (hasKey) {
+                throw refuse("the local demo must not have a Gemini API key; remove GEMINI_API_KEY from the launch "
+                        + "configuration (or opt in deliberately with INVOICE_LOCALDEMO_GEMINI_ENABLED=true)");
+            }
+            if (worker) {
+                throw refuse("the local demo must not enable the extraction worker (INVOICE_WORKER_ENABLED) unless "
+                        + "INVOICE_LOCALDEMO_GEMINI_ENABLED=true");
+            }
+            return;
+        }
+        if (!hasKey) {
+            throw refuse("INVOICE_LOCALDEMO_GEMINI_ENABLED=true but GEMINI_API_KEY is not set");
+        }
+        if (!OFFICIAL_GEMINI_BASE_URL.equals(env.getProperty("gemini.base-url", "").trim())) {
+            throw refuse("with INVOICE_LOCALDEMO_GEMINI_ENABLED=true the Gemini key may only be sent to "
+                    + OFFICIAL_GEMINI_BASE_URL + "; remove any gemini.base-url / GEMINI_BASE_URL override");
+        }
+        // The model is chosen on purpose, never the silent default: it must be the one checked in AI Studio.
+        String model = env.getProperty("GEMINI_MODEL", "").trim();
+        if (model.isEmpty()) {
+            throw refuse("with INVOICE_LOCALDEMO_GEMINI_ENABLED=true set GEMINI_MODEL explicitly (the model whose limits "
+                    + "you copied from Google AI Studio)");
+        }
+        if (!model.matches("[a-z0-9][a-z0-9.-]{1,79}") || !model.equals(env.getProperty("gemini.model", "").trim())) {
+            throw refuse("GEMINI_MODEL must be a plain model id such as gemini-3.5-flash-lite, and nothing else may "
+                    + "override gemini.model");
+        }
+        // Limits are validated at startup instead of leaving a silently idle worker. Messages name properties only.
+        double safetyMargin;
+        try {
+            safetyMargin = Double.parseDouble(env.getProperty("gemini.limits.safety-margin", "0.8").trim());
+        } catch (NumberFormatException e) {
+            throw refuse("gemini.limits.safety-margin must be a number");
+        }
+        QuotaSettings limits = new QuotaSettings(env.getProperty("gemini.limits.rpm", ""),
+                env.getProperty("gemini.limits.tpm", ""), env.getProperty("gemini.limits.rpd", ""),
+                env.getProperty("gemini.limits.initial-token-estimate", ""), safetyMargin);
+        if (!limits.isConfigured()) {
+            throw refuse("the Gemini limits are not usable: " + limits.getProblem() + " Use whole numbers from Google "
+                    + "AI Studio (e.g. 250000, not 250k)");
+        }
+        // The legacy single-file endpoint would call Gemini for any file an admin uploads, outside the allowlist.
+        if (!"false".equalsIgnoreCase(env.getProperty(LEGACY_EXTRACT_PROPERTY, "true").trim())) {
+            throw refuse("with INVOICE_LOCALDEMO_GEMINI_ENABLED=true the legacy single-file extraction must stay "
+                    + "disabled (" + LEGACY_EXTRACT_PROPERTY + "=false); only allowlisted queued invoices may be extracted");
+        }
+        if (worker) {
+            String ids = env.getProperty(WORKER_ONLY_INVOICE_IDS_PROPERTY, "").trim();
+            if (ids.isEmpty()) {
+                throw refuse("the local demo worker must be limited to named invoices: set "
+                        + "INVOICE_WORKER_ONLY_INVOICE_IDS (e.g. the id of one synthetic test invoice) so the existing "
+                        + "queue is not processed");
+            }
+            if (!ids.matches("\\d+(\\s*,\\s*\\d+)*")) {
+                throw refuse("INVOICE_WORKER_ONLY_INVOICE_IDS must be a comma-separated list of invoice ids");
+            }
+        }
+    }
+
+    /** Rule 3: no setting may let Hibernate or Spring change the schema. */
+    static void requireNonMutatingSchemaSettings(Environment env) {
         requireOneOf(env, "spring.jpa.hibernate.ddl-auto", "validate", "none");
         requireOneOf(env, "spring.jpa.properties.hibernate.hbm2ddl.auto", "validate", "none");
         requireOneOf(env, "spring.jpa.properties.javax.persistence.schema-generation.database.action", "none");
@@ -77,7 +215,7 @@ public class SchemaSafetyGuard implements BeanFactoryPostProcessor, EnvironmentA
         requireOneOf(env, "jakarta.persistence.schema-generation.database.action", "none");
         requireOneOf(env, "spring.jpa.generate-ddl", "false");
         requireOneOf(env, "spring.sql.init.mode", "never", "embedded");
-        requireApprovedEndpoint(env);
+        requireOneOf(env, "spring.datasource.initialization-mode", "never", "embedded"); // deprecated alias
     }
 
     /**
@@ -141,26 +279,58 @@ public class SchemaSafetyGuard implements BeanFactoryPostProcessor, EnvironmentA
         return host.toLowerCase(Locale.ROOT) + ":" + Integer.parseInt(port) + "/" + database;
     }
 
+    /** The profiles Spring really uses: the active ones or, when none is active, the default ones. */
+    static String[] effectiveProfiles(Environment env) {
+        String[] active = env.getActiveProfiles();
+        return active.length > 0 ? active : env.getDefaultProfiles();
+    }
+
     static boolean isIsolatedTestRun(Environment env) {
         if (!Arrays.equals(env.getActiveProfiles(), new String[]{TEST_PROFILE})) {
             return false;
         }
-        String url = env.getProperty("spring.datasource.url", "");
-        String withoutParams = url.contains("?") ? url.substring(0, url.indexOf('?')) : url;
-        return withoutParams.endsWith("/" + TEST_DATABASE);
+        // Host and port are pinned too, not only the database name.
+        return TEST_ENDPOINT.equals(endpointOf(env.getProperty("spring.datasource.url", "")));
     }
 
-    /** Unset is fine (Spring Boot's default for a non-embedded database is to change nothing). */
+    /**
+     * Unset is fine (Spring Boot's default for a non-embedded database is to change nothing). EVERY value is checked,
+     * not just the one that wins: the resolved value (also covers JVM -D properties and SPRING_... environment
+     * variables) plus each entry, in every property source, whose name is another spelling of the key - ddlAuto,
+     * ddl_auto, DDL-AUTO or [bracket] map keys - so two spellings in one file cannot hide each other.
+     */
     private static void requireOneOf(Environment env, String key, String... allowed) {
-        String value = env.getProperty(key);
-        if (value == null || value.trim().isEmpty()) {
-            return;
+        List<String> values = new ArrayList<>();
+        values.add(env.getProperty(key));
+        if (env instanceof ConfigurableEnvironment) {
+            String wanted = relaxed(key);
+            for (PropertySource<?> source : ((ConfigurableEnvironment) env).getPropertySources()) {
+                if (!(source instanceof EnumerablePropertySource)) {
+                    continue;
+                }
+                for (String name : ((EnumerablePropertySource<?>) source).getPropertyNames()) {
+                    Object raw = source.getProperty(name);
+                    if (raw != null && relaxed(name).equals(wanted)) {
+                        values.add(env.resolvePlaceholders(String.valueOf(raw)));
+                    }
+                }
+            }
         }
-        String normalized = value.trim().toLowerCase(Locale.ROOT);
-        if (!Arrays.asList(allowed).contains(normalized)) {
-            throw refuse(key + "=" + normalized + " could change the database schema; allowed: "
-                    + String.join(", ", allowed));
+        for (String value : values) {
+            if (value == null || value.trim().isEmpty()) {
+                continue;
+            }
+            String normalized = value.trim().toLowerCase(Locale.ROOT);
+            if (!Arrays.asList(allowed).contains(normalized)) {
+                throw refuse(key + "=" + normalized + " could change the database schema; allowed: "
+                        + String.join(", ", allowed));
+            }
         }
+    }
+
+    /** "spring.jpa.hibernate.ddlAuto" / "...ddl_auto" / "...[ddl-auto]" -> "spring.jpa.hibernate.ddlauto". */
+    static String relaxed(String name) {
+        return name.toLowerCase(Locale.ROOT).replace("[", ".").replace("]", "").replace("-", "").replace("_", "");
     }
 
     private static IllegalStateException refuse(String reason) {

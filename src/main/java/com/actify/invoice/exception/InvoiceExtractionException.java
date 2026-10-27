@@ -35,6 +35,7 @@ public class InvoiceExtractionException extends RuntimeException {
     private final Kind kind;
     private final Integer httpStatus;
     private final String providerCode;
+    private final Long retryAfterSeconds;
 
     public InvoiceExtractionException(String message) {
         this(message, null, null);
@@ -50,7 +51,14 @@ public class InvoiceExtractionException extends RuntimeException {
 
     public InvoiceExtractionException(String message, Kind kind, Integer httpStatus, String providerCode,
                                       TokenUsage tokenUsage, Throwable cause) {
+        this(message, kind, httpStatus, providerCode, tokenUsage, null, cause);
+    }
+
+    /** retryAfterSeconds: how long the provider asked us to wait (Retry-After / RetryInfo), or null. */
+    public InvoiceExtractionException(String message, Kind kind, Integer httpStatus, String providerCode,
+                                      TokenUsage tokenUsage, Long retryAfterSeconds, Throwable cause) {
         super(message, cause);
+        this.retryAfterSeconds = retryAfterSeconds;
         this.kind = kind == null ? Kind.UNSPECIFIED : kind;
         this.httpStatus = httpStatus;
         this.providerCode = providerCode;
@@ -71,5 +79,9 @@ public class InvoiceExtractionException extends RuntimeException {
 
     public String getProviderCode() {
         return providerCode;
+    }
+
+    public Long getRetryAfterSeconds() {
+        return retryAfterSeconds;
     }
 }

@@ -19,16 +19,22 @@ import org.springframework.web.context.WebApplicationContext;
 import com.actify.invoice.repository.InvoiceRepository;
 import com.actify.invoice.security.JwtTokenService;
 import com.actify.invoice.security.TestLogins;
-import com.actify.invoice.security.WithTask8WebSecurity;
+import com.actify.invoice.security.WithInvoiceWebSecurity;
 import com.actify.invoice.user.AppUserRepository;
 import com.actify.invoice.user.Role;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.apache.catalina.connector.ClientAbortException;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
 import javax.servlet.http.Cookie;
 
 import java.math.BigDecimal;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
@@ -45,9 +51,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * Checks the HTTP side of the failures we can't safely trigger live:
  * provider errors, bad LLM data and unexpected crashes. The service is mocked,
  * so no Gemini call and no database are involved.
+ * The default profile is localdemo, which switches the legacy endpoint off; these tests are about the endpoint
+ * itself, so they switch it on (the "off" case is LegacyExtractSwitchTest).
  */
-@WebMvcTest(InvoiceController.class)
-@WithTask8WebSecurity
+@WebMvcTest(value = InvoiceController.class, properties = "invoice.legacy-extract.enabled=true")
+@WithInvoiceWebSecurity
+@ExtendWith(OutputCaptureExtension.class)
 class InvoiceControllerTest {
 
     @Autowired
@@ -110,9 +119,22 @@ class InvoiceControllerTest {
         mockMvc.perform(multipart("/api/invoices/extract").file(pdf))
                 .andExpect(status().isInternalServerError())
                 .andExpect(jsonPath("$.message").value("An unexpected error occurred."))
+                .andExpect(jsonPath("$.errorId").value(matchesPattern("[0-9a-f]{8}")))
                 .andExpect(content().string(not(containsString("jdbc"))))
                 .andExpect(content().string(not(containsString("password"))))
                 .andExpect(content().string(not(containsString("IllegalStateException"))));
+    }
+
+    @Test
+    void aBrowserClosingTheConnectionIsNotReportedAsAServerError(CapturedOutput log) throws Exception {
+        when(invoiceService.extractAndSave(any())).thenAnswer(call -> {
+            throw new ClientAbortException("An established connection was aborted by the software in your host machine");
+        });
+
+        mockMvc.perform(multipart("/api/invoices/extract").file(pdf))
+                .andExpect(status().isOk())
+                .andExpect(content().string(""));
+        assertThat(log.getOut()).doesNotContain("Unexpected error").doesNotContain("ClientAbortException");
     }
 
     // ---------------- tokenUsage in the JSON response ----------------

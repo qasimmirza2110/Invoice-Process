@@ -37,8 +37,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class JwtCompatibilitySpikeTest {
 
-    private static final String ISSUER = "task8-invoice";
-    private static final String AUDIENCE = "task8-web";
+    private static final String ISSUER = "actify-invoice-process";
+    private static final String AUDIENCE = "actify-invoice-process-web";
 
     private final SecretKey key = randomKey();
     private final NimbusJwtEncoder encoder = new NimbusJwtEncoder(new ImmutableSecret<>(key));
@@ -69,7 +69,7 @@ class JwtCompatibilitySpikeTest {
         String token = encode(Instant.now(), Instant.now().plusSeconds(1800), ISSUER, AUDIENCE);
         String[] parts = token.split("\\.");
         String forgedPayload = Base64URL.encode(
-                "{\"sub\":\"1\",\"iss\":\"task8-invoice\",\"aud\":\"task8-web\",\"tv\":0}").toString();
+                "{\"sub\":\"1\",\"iss\":\"actify-invoice-process\",\"aud\":\"actify-invoice-process-web\",\"tv\":0}").toString();
         String tampered = parts[0] + "." + forgedPayload + "." + parts[2];
 
         assertThatThrownBy(() -> decoder.decode(tampered)).isInstanceOf(JwtException.class);
@@ -86,7 +86,7 @@ class JwtCompatibilitySpikeTest {
     @Test
     void rejectsAlgNone() {
         String header = Base64URL.encode("{\"alg\":\"none\",\"typ\":\"JWT\"}").toString();
-        String payload = Base64URL.encode("{\"sub\":\"42\",\"iss\":\"task8-invoice\",\"aud\":\"task8-web\",\"tv\":0,\"exp\":"
+        String payload = Base64URL.encode("{\"sub\":\"42\",\"iss\":\"actify-invoice-process\",\"aud\":\"actify-invoice-process-web\",\"tv\":0,\"exp\":"
                 + Instant.now().plusSeconds(600).getEpochSecond() + "}").toString();
 
         assertThatThrownBy(() -> decoder.decode(header + "." + payload + ".")).isInstanceOf(JwtException.class);
@@ -167,7 +167,7 @@ class JwtCompatibilitySpikeTest {
 
     private static String validPayloadJson() {
         long now = Instant.now().getEpochSecond();
-        return "{\"sub\":\"42\",\"iss\":\"task8-invoice\",\"aud\":\"task8-web\",\"tv\":0,\"iat\":" + now
+        return "{\"sub\":\"42\",\"iss\":\"actify-invoice-process\",\"aud\":\"actify-invoice-process-web\",\"tv\":0,\"iat\":" + now
                 + ",\"exp\":" + (now + 600) + "}";
     }
 

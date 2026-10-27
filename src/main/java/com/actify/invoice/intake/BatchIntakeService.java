@@ -5,6 +5,8 @@ import com.actify.invoice.dto.BatchDtos.BatchInvoice;
 import com.actify.invoice.dto.BatchDtos.BatchSummary;
 import com.actify.invoice.dto.BatchDtos.FileIntakeResponse;
 import com.actify.invoice.dto.BatchDtos.RejectedFile;
+import com.actify.invoice.dto.FieldErrorDto;
+import com.actify.invoice.cloud.CloudSourceSettings;
 import com.actify.invoice.entity.BatchSource;
 import com.actify.invoice.entity.BatchStatus;
 import com.actify.invoice.entity.ExtractionJob;
@@ -14,6 +16,7 @@ import com.actify.invoice.entity.InvoiceStatus;
 import com.actify.invoice.entity.UploadBatch;
 import com.actify.invoice.exception.BatchNotFoundException;
 import com.actify.invoice.exception.InvalidInvoiceException;
+import com.actify.invoice.exception.InvalidRequestException;
 import com.actify.invoice.exception.WorkflowConflictException;
 import com.actify.invoice.repository.ExtractionJobRepository;
 import com.actify.invoice.repository.InvoiceDocumentRepository;
@@ -38,9 +41,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
 
 import javax.persistence.EntityManager;
+import javax.persistence.LockModeType;
 import javax.persistence.PersistenceContext;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -74,6 +79,7 @@ public class BatchIntakeService {
     private final TransactionTemplate transactionTemplate;
     private final ObjectMapper objectMapper;
     private final CategoryCodes categoryCodes;
+    private final CloudSourceSettings cloudSources;
     private final int maxAttempts;
 
     @PersistenceContext
@@ -83,7 +89,7 @@ public class BatchIntakeService {
                               InvoiceDocumentRepository documentRepository, ExtractionJobRepository jobRepository,
                               InvoiceDocumentStorage documentStorage, WorkflowService workflow,
                               CurrentUserService currentUser, TransactionTemplate transactionTemplate,
-                              ObjectMapper objectMapper, CategoryCodes categoryCodes,
+                              ObjectMapper objectMapper, CategoryCodes categoryCodes, CloudSourceSettings cloudSources,
                               @Value("${invoice.worker.max-attempts:3}") int maxAttempts) {
         this.batchRepository = batchRepository;
         this.invoiceRepository = invoiceRepository;
@@ -95,6 +101,7 @@ public class BatchIntakeService {
         this.transactionTemplate = transactionTemplate;
         this.objectMapper = objectMapper;
         this.categoryCodes = categoryCodes;
+        this.cloudSources = cloudSources;
         this.maxAttempts = maxAttempts;
     }
 
@@ -102,15 +109,30 @@ public class BatchIntakeService {
 
     @Transactional
     public BatchSummary createBatch(String label, String defaultCategoryCode) {
+        return createBatch(label, defaultCategoryCode, null);
+    }
+
+    /** @param source LOCAL (default), GOOGLE_DRIVE or ONEDRIVE; one source per batch, cloud ones only when configured. */
+    @Transactional
+    public BatchSummary createBatch(String label, String defaultCategoryCode, String source) {
         AuthenticatedUser user = currentUser.require();
+        BatchSource batchSource = parseSource(source);
+        if (batchSource == null) {
+            throw new InvalidRequestException("source must be LOCAL, GOOGLE_DRIVE or ONEDRIVE",
+                    Collections.singletonList(new FieldErrorDto("source", "source must be LOCAL, GOOGLE_DRIVE or ONEDRIVE")));
+        }
+        if (!cloudSources.isUsable(batchSource)) {
+            throw new InvalidRequestException(batchSource + " is not configured on this server",
+                    Collections.singletonList(new FieldErrorDto("source", batchSource + " is not configured on this server")));
+        }
         String cleanLabel = label == null || label.trim().isEmpty() ? null : label.trim();
         if (cleanLabel != null && cleanLabel.length() > 255) {
             cleanLabel = cleanLabel.substring(0, 255);
         }
         String category = categoryCodes.requireActiveOrNull(defaultCategoryCode);
         AppUser owner = entityManager.find(AppUser.class, user.getId());
-        UploadBatch batch = batchRepository.save(new UploadBatch(owner, BatchSource.LOCAL, cleanLabel, category));
-        log.info("Batch {} created by user {}", batch.getId(), user.getId());
+        UploadBatch batch = batchRepository.save(new UploadBatch(owner, batchSource, cleanLabel, category));
+        log.info("Batch {} ({}) created by user {}", batch.getId(), batchSource, user.getId());
         return new BatchSummary(batch);
     }
 
@@ -163,11 +185,24 @@ public class BatchIntakeService {
 
     // ---------------------------------------------------------------- files
 
+    /** SELECT ... FOR UPDATE on the vendor's app_users row; released when the surrounding transaction ends. */
+    void lockVendor(Long userId) {
+        entityManager.find(AppUser.class, userId, LockModeType.PESSIMISTIC_WRITE);
+    }
+
     /**
      * @param relativePath the browser's webkitRelativePath for folder uploads ("Folder/file.pdf"), or null.
      *                     Policy: top-level files only - anything inside a sub-folder is rejected.
      */
     public FileIntakeResponse addFile(Long batchId, MultipartFile file, String relativePath) {
+        return addFile(batchId, file, relativePath, null);
+    }
+
+    /**
+     * @param declaredSource what the browser says the file came from (optional; missing = the batch's own source).
+     *                       It is a label, not proof: a cloud file is checked exactly like a local one.
+     */
+    public FileIntakeResponse addFile(Long batchId, MultipartFile file, String relativePath, String declaredSource) {
         AuthenticatedUser user = currentUser.require();
         String fileName = PdfFiles.safeFileName(file == null ? null : file.getOriginalFilename());
 
@@ -176,6 +211,10 @@ public class BatchIntakeService {
         requireOwner(batch, user);
         requireAcceptingFiles(batch);
 
+        if (!sourceMatches(batch.getSource(), declaredSource)) {
+            return reject(batchId, fileName, "SOURCE_MISMATCH", "This batch only takes files from "
+                    + batch.getSource() + "; start a new batch for another source.");
+        }
         if (isInSubFolder(relativePath)) {
             return reject(batchId, fileName, "NESTED_FOLDER", "Files inside sub-folders are skipped (top-level PDFs only).");
         }
@@ -192,10 +231,14 @@ public class BatchIntakeService {
         StoredDocument stored = documentStorage.store(bytes);
         try {
             Long invoiceId = transactionTemplate.execute(status -> {
+                // Lock order: vendor row first, then batch row. The vendor lock (SELECT ... FOR UPDATE on app_users)
+                // serialises ALL of this vendor's uploads, so the same file sent into two different batches at the
+                // same moment cannot both pass the duplicate check below. Other vendors are never blocked.
+                lockVendor(user.getId());
                 UploadBatch locked = batchRepository.findByIdForUpdate(batchId)
                         .orElseThrow(() -> new BatchNotFoundException(batchId));
                 requireAcceptingFiles(locked);
-                // Re-checked under the batch lock: two uploads of the same file into this batch cannot both pass.
+                // Re-checked under the vendor lock: two uploads of the same file (same or different batch) cannot both pass.
                 if (invoiceRepository.countByOwnerAndSha256(user.getId(), stored.getSha256()) > 0) {
                     return null;
                 }
@@ -231,6 +274,26 @@ public class BatchIntakeService {
     }
 
     /** "Folder/file.pdf" is top-level; "Folder/Sub/file.pdf" is inside a sub-folder. */
+    /** null/blank -> LOCAL; unknown -> null. */
+    static BatchSource parseSource(String source) {
+        if (source == null || source.trim().isEmpty()) {
+            return BatchSource.LOCAL;
+        }
+        try {
+            return BatchSource.valueOf(source.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /** A file may declare no source (it then counts as the batch's own) or exactly the batch's source. */
+    static boolean sourceMatches(BatchSource batchSource, String declaredSource) {
+        if (declaredSource == null || declaredSource.trim().isEmpty()) {
+            return true;
+        }
+        return batchSource == parseSource(declaredSource);
+    }
+
     static boolean isInSubFolder(String relativePath) {
         if (relativePath == null || relativePath.trim().isEmpty()) {
             return false;

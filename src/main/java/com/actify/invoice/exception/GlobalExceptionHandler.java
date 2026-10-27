@@ -3,6 +3,7 @@ package com.actify.invoice.exception;
 import com.actify.invoice.dto.ErrorResponse;
 import com.actify.invoice.dto.FieldErrorDto;
 import com.fasterxml.jackson.databind.JsonMappingException;
+import org.apache.catalina.connector.ClientAbortException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -21,6 +22,7 @@ import org.springframework.web.multipart.support.MissingServletRequestPartExcept
 import javax.servlet.http.HttpServletRequest;
 import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Turns exceptions into the single ErrorResponse JSON shape.
@@ -166,12 +168,22 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.FORBIDDEN, "Forbidden", "You do not have permission to do this.", request);
     }
 
+    // The browser closed the connection while we were still sending (e.g. the reviewer switched invoices while a PDF
+    // was loading). Not a server error, and nobody is left to receive a response.
+    @ExceptionHandler(ClientAbortException.class)
+    public void handleClientAbort(ClientAbortException ex, HttpServletRequest request) {
+        log.debug("Client closed the connection during {} {}", request.getMethod(), request.getRequestURI());
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpected(Exception ex, HttpServletRequest request) {
-        // Full details go to the server log only, never to the client.
-        log.error("Unexpected error on {}", request.getRequestURI(), ex);
-        return build(HttpStatus.INTERNAL_SERVER_ERROR, "Internal server error",
-                "An unexpected error occurred.", request);
+        // Full details go to the server log only, never to the client. The client gets only the reference, so the
+        // matching log line can be found ("grep <errorId>").
+        String errorId = UUID.randomUUID().toString().substring(0, 8);
+        log.error("Unexpected error {} on {} {}", errorId, request.getMethod(), request.getRequestURI(), ex);
+        ErrorResponse body = new ErrorResponse(HttpStatus.INTERNAL_SERVER_ERROR.value(), "Internal server error",
+                "An unexpected error occurred.", request.getRequestURI()).withErrorId(errorId);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(body);
     }
 
     private ResponseEntity<ErrorResponse> build(HttpStatus status, String error, String message,

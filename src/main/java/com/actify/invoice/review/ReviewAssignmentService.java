@@ -15,9 +15,12 @@ import com.actify.invoice.intake.CategoryCodes;
 import com.actify.invoice.repository.CategoryRepository;
 import com.actify.invoice.repository.InvoiceRepository;
 import com.actify.invoice.repository.ReviewerCategoryRepository;
+import com.actify.invoice.security.CurrentUserService;
 import com.actify.invoice.user.AppUser;
 import com.actify.invoice.user.AppUserRepository;
 import com.actify.invoice.user.Role;
+import com.actify.invoice.user.UserNames;
+import com.actify.invoice.workflow.WorkflowService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -52,15 +55,19 @@ public class ReviewAssignmentService {
     private final ReviewerCategoryRepository reviewerCategories;
     private final InvoiceRepository invoiceRepository;
     private final CategoryCodes categoryCodes;
+    private final WorkflowService workflow;
+    private final CurrentUserService currentUser;
 
     public ReviewAssignmentService(AppUserRepository userRepository, CategoryRepository categoryRepository,
                                    ReviewerCategoryRepository reviewerCategories, InvoiceRepository invoiceRepository,
-                                   CategoryCodes categoryCodes) {
+                                   CategoryCodes categoryCodes, WorkflowService workflow, CurrentUserService currentUser) {
         this.userRepository = userRepository;
         this.categoryRepository = categoryRepository;
         this.reviewerCategories = reviewerCategories;
         this.invoiceRepository = invoiceRepository;
         this.categoryCodes = categoryCodes;
+        this.workflow = workflow;
+        this.currentUser = currentUser;
     }
 
     @Transactional(readOnly = true)
@@ -106,6 +113,16 @@ public class ReviewAssignmentService {
     /** Assigns (or, with reviewerId null, unassigns) each invoice; returns one result per invoice id. */
     @Transactional
     public List<AssignmentResult> assign(List<Long> invoiceIds, Long reviewerId) {
+        return assign(invoiceIds, reviewerId, false);
+    }
+
+    /**
+     * @param reassign false (the normal "Assign" action): an invoice that already has a reviewer is NOT changed - the
+     *                 result says so. true (the explicit "Reassign"/"Unassign" action): the current reviewer is replaced.
+     *                 Every change writes one audit event (actor, old -> new reviewer).
+     */
+    @Transactional
+    public List<AssignmentResult> assign(List<Long> invoiceIds, Long reviewerId, boolean reassign) {
         if (invoiceIds == null || invoiceIds.isEmpty() || invoiceIds.size() > 200) {
             throw new InvalidRequestException("invoiceIds must contain 1-200 ids", Collections.singletonList(
                     new FieldErrorDto("invoiceIds", "invoiceIds must contain 1-200 ids")));
@@ -114,23 +131,54 @@ public class ReviewAssignmentService {
         if (reviewer != null && !reviewer.isEnabled()) {
             throw new WorkflowConflictException("Reviewer " + reviewerId + " is disabled.");
         }
+        Long actorId = currentUser.require().getId();
         List<AssignmentResult> results = new ArrayList<>();
         for (Long id : new LinkedHashSet<>(invoiceIds)) {
             Invoice invoice = invoiceRepository.findByIdForUpdate(id).orElse(null);
             if (invoice == null || invoice.isLegacy()) {
                 results.add(new AssignmentResult(id, false, "No such workflow invoice."));
-            } else if (!ASSIGNABLE.contains(invoice.getStatus())) {
-                results.add(new AssignmentResult(id, false, "Status " + invoice.getStatus() + " cannot be (re)assigned."));
+                continue;
+            }
+            Long currentId = invoice.getAssignedReviewerId();
+            Long wantedId = reviewer == null ? null : reviewer.getId();
+            if (!ASSIGNABLE.contains(invoice.getStatus())) {
+                results.add(refused(invoice, "Status " + invoice.getStatus() + " cannot be (re)assigned."));
+            } else if (wantedId != null && wantedId.equals(currentId)) {
+                results.add(result(invoice, true, "Already assigned to " + nameOf(reviewer) + "."));
+            } else if (currentId != null && !reassign) {
+                results.add(refused(invoice, "Already assigned to " + nameOf(invoice.getAssignedReviewer())
+                        + "; use Reassign to change it."));
+            } else if (reviewer == null && currentId == null) {
+                results.add(result(invoice, true, "Not assigned."));
             } else if (reviewer != null && invoice.getCategoryCode() == null) {
-                results.add(new AssignmentResult(id, false, "Set the invoice's category first."));
+                results.add(refused(invoice, "Set the invoice's category first."));
             } else if (reviewer != null && !reviewerCategories.reviewerHasCategory(reviewer.getId(), invoice.getCategoryCode())) {
-                results.add(new AssignmentResult(id, false, "The reviewer does not handle category " + invoice.getCategoryCode() + "."));
+                results.add(refused(invoice, "The reviewer does not handle category " + invoice.getCategoryCode() + "."));
             } else {
+                String before = currentId == null ? "nobody" : nameOf(invoice.getAssignedReviewer());
                 invoice.setAssignedReviewer(reviewer);
-                results.add(new AssignmentResult(id, true, reviewer == null ? "Unassigned." : "Assigned."));
+                String after = reviewer == null ? "nobody" : nameOf(reviewer);
+                workflow.recordAssignment(invoice, actorId, (currentId == null ? "Assigned to " : "Reassigned from " + before + " to ")
+                        + after);
+                log.info("Invoice {}: reviewer {} -> {} by user {}", id, currentId, wantedId, actorId);
+                results.add(result(invoice, true, reviewer == null ? "Unassigned." : currentId == null ? "Assigned." : "Reassigned."));
             }
         }
         return results;
+    }
+
+    private static AssignmentResult refused(Invoice invoice, String message) {
+        return result(invoice, false, message);
+    }
+
+    private static AssignmentResult result(Invoice invoice, boolean assigned, String message) {
+        AppUser reviewer = invoice.getAssignedReviewer();
+        return new AssignmentResult(invoice.getId(), assigned, message, invoice.getStatus(),
+                reviewer == null ? null : reviewer.getId(), reviewer == null ? null : nameOf(reviewer));
+    }
+
+    private static String nameOf(AppUser user) {
+        return UserNames.label(user.getDisplayName(), user.getEmail());
     }
 
     private AppUser requireReviewer(Long reviewerId) {

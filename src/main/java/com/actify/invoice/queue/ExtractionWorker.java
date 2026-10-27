@@ -1,5 +1,6 @@
 package com.actify.invoice.queue;
 
+import com.actify.invoice.config.GeminiConfig;
 import com.actify.invoice.dto.LlmExtractionResponse;
 import com.actify.invoice.entity.GeminiCallAttempt.Outcome;
 import com.actify.invoice.exception.InvoiceExtractionException;
@@ -14,6 +15,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 import java.lang.management.ManagementFactory;
 import java.time.LocalDateTime;
@@ -39,6 +41,7 @@ public class ExtractionWorker {
 
     static final long BASE_BACKOFF_SECONDS = 30;
     static final long MAX_BACKOFF_SECONDS = 15 * 60;
+    static final long MAX_PROVIDER_WAIT_SECONDS = 60 * 60;
 
     private final ExtractionJobService jobService;
     private final ExtractionOutcomeService outcomes;
@@ -46,13 +49,14 @@ public class ExtractionWorker {
     private final LlmInvoiceExtractor extractor;
     private final GeminiQuotaGuard quotaGuard;
     private final QuotaSettings quotaSettings;
+    private final GeminiConfig geminiConfig;
     private final boolean enabled;
     private final String workerName = "worker-" + ManagementFactory.getRuntimeMXBean().getName();
     private boolean warnedNotConfigured;
 
     public ExtractionWorker(ExtractionJobService jobService, ExtractionOutcomeService outcomes,
                             InvoiceDocumentStorage documentStorage, LlmInvoiceExtractor extractor,
-                            GeminiQuotaGuard quotaGuard, QuotaSettings quotaSettings,
+                            GeminiQuotaGuard quotaGuard, QuotaSettings quotaSettings, GeminiConfig geminiConfig,
                             @Value("${invoice.worker.enabled:false}") boolean enabled) {
         this.jobService = jobService;
         this.outcomes = outcomes;
@@ -60,6 +64,7 @@ public class ExtractionWorker {
         this.extractor = extractor;
         this.quotaGuard = quotaGuard;
         this.quotaSettings = quotaSettings;
+        this.geminiConfig = geminiConfig;
         this.enabled = enabled;
     }
 
@@ -79,9 +84,18 @@ public class ExtractionWorker {
         }
     }
 
-    /** True when the background worker actually runs (enabled AND limits configured). */
+    /** True when the background worker actually runs (enabled AND an API key AND limits configured). */
     public boolean isRunning() {
         if (!enabled) {
+            return false;
+        }
+        // Without a key every claimed job would fail as CONFIGURATION and end up FAILED: a setup problem must leave
+        // the queue untouched (QUEUED, "waiting for extraction"), not be recorded as an extraction failure.
+        if (!hasApiKey()) {
+            if (!warnedNotConfigured) {
+                log.warn("Extraction worker is enabled but stays idle: GEMINI_API_KEY is not set");
+                warnedNotConfigured = true;
+            }
             return false;
         }
         if (!quotaSettings.isConfigured()) {
@@ -96,6 +110,11 @@ public class ExtractionWorker {
 
     public boolean isEnabled() {
         return enabled;
+    }
+
+    /** Presence only - the key itself is never returned or logged. */
+    public boolean hasApiKey() {
+        return StringUtils.hasText(geminiConfig.getApiKey());
     }
 
     /** @return true when a job was processed (success or failure), false when quota or the queue said "not now" */
@@ -131,8 +150,8 @@ public class ExtractionWorker {
                     e.getTokenUsage(), durationMs);
         } else if (decision == FailureClassifier.Decision.RETRY && job.hasAttemptsLeftAfterThis()) {
             quotaGuard.complete(job.getGeminiAttemptId(), Outcome.RETRYABLE_ERROR, e.getHttpStatus(), code, e.getTokenUsage(), durationMs);
-            LocalDateTime next = LocalDateTime.now().plusSeconds(backoffSeconds(job.getAttemptNumber(),
-                    ThreadLocalRandom.current().nextDouble()));
+            LocalDateTime next = LocalDateTime.now().plusSeconds(retryDelaySeconds(job.getAttemptNumber(),
+                    ThreadLocalRandom.current().nextDouble(), e.getRetryAfterSeconds()));
             outcomes.scheduleRetry(job.getInvoiceId(), code, e.getMessage(), next, e.getTokenUsage(), durationMs);
         } else {
             quotaGuard.complete(job.getGeminiAttemptId(),
@@ -156,6 +175,19 @@ public class ExtractionWorker {
         double capped = Math.min(base, MAX_BACKOFF_SECONDS);
         double jitter = 0.8 + 0.4 * random;
         return Math.max(1, Math.round(capped * jitter));
+    }
+
+    /**
+     * Our own back-off, but never shorter than the wait the provider asked for (Retry-After / RetryInfo). The provider's
+     * hint is capped at MAX_PROVIDER_WAIT_SECONDS so one odd value cannot park a job for a day; a daily-quota 429 is
+     * handled separately (wait for the reset) and never comes here.
+     */
+    static long retryDelaySeconds(int attemptNumber, double random, Long providerRetryAfterSeconds) {
+        long ours = backoffSeconds(attemptNumber, random);
+        if (providerRetryAfterSeconds == null || providerRetryAfterSeconds <= 0) {
+            return ours;
+        }
+        return Math.max(ours, Math.min(providerRetryAfterSeconds, MAX_PROVIDER_WAIT_SECONDS));
     }
 
     private static long elapsedMillis(long startNanos) {
