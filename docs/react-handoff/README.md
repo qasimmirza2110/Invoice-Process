@@ -36,49 +36,16 @@ dev server over HTTPS (for example with `@vitejs/plugin-basic-ssl`) and open `ht
 
 ## 3. One API client for the whole app
 
-```ts
-// src/api/client.ts — every request goes through here (never raw fetch in components)
-export type ApiError = {
-  status: number; error: string; message: string; path: string;
-  fieldErrors?: { field: string; message: string }[] | null; errorId?: string;
-};
+Use the client in `REACT_DEVELOPER_HANDOFF.html`, section **"The one API client"** — the only maintained copy, so
+it cannot drift. It was syntax-checked and its behaviour tested (CSRF header on POST/PUT only, JSON vs `FormData`,
+query strings, 204, PDFs as blobs, and a 422 upload rejection keeping its real status and `code`).
 
-const BASE = import.meta.env.VITE_API_BASE_URL ?? '';   // keep EMPTY (same origin)
+Two rules it encodes:
 
-function xsrfToken(): string {
-  const m = document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);
-  return m ? decodeURIComponent(m[1]) : '';            // read at send time - it changes at login/logout
-}
-
-export class HttpError extends Error {
-  constructor(public readonly body: ApiError) { super(body.message); }
-}
-
-let onSessionExpired: () => void = () => {};
-export function setSessionExpiredHandler(handler: () => void) { onSessionExpired = handler; }
-
-export async function api<T>(path: string, init: { method?: string; json?: unknown; form?: FormData;
-                                                   signal?: AbortSignal } = {}): Promise<T> {
-  const method = init.method ?? 'GET';
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  if (method !== 'GET') headers['X-XSRF-TOKEN'] = xsrfToken();
-  if (init.json !== undefined) headers['Content-Type'] = 'application/json';
-  // multipart: do NOT set Content-Type yourself - the browser adds the boundary.
-  const res = await fetch(BASE + path, {
-    method, headers, signal: init.signal, credentials: 'same-origin',
-    body: init.json !== undefined ? JSON.stringify(init.json) : init.form,
-  });
-  if (res.status === 204) return undefined as T;
-  const isJson = (res.headers.get('Content-Type') ?? '').includes('application/json');
-  if (!res.ok) {
-    const body: ApiError = isJson ? await res.json()
-      : { status: res.status, error: res.statusText, message: 'Unexpected response', path };
-    if (res.status === 401 && path !== '/api/auth/login') onSessionExpired();
-    throw new HttpError(body);
-  }
-  return (isJson ? res.json() : res.blob()) as Promise<T>;
-}
-```
+- A 401 is reported to the session handler, which acts **only when the user was logged in**. The 401 from
+  `GET /api/auth/me` at app start simply means "show the login screen" — never a redirect loop.
+- Upload rejections (422) return a `FileIntakeResponse`, not the usual error body: read `error.body.code`
+  (for example `NOT_A_DEMO_FIXTURE`) and `error.body.message`.
 
 Start-up order: `GET /api/auth/me` (200 → route by `role`; 401 → login screen — this call also hands out the
 `XSRF-TOKEN` cookie), then `POST /api/auth/login` with `X-XSRF-TOKEN`.

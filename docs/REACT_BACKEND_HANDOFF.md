@@ -78,7 +78,9 @@ export async function api(path, { method = 'GET', json, form, signal } = {}) {
   if (json !== undefined) headers['Content-Type'] = 'application/json';
   const res = await fetch(path, { method, headers, signal, credentials: 'same-origin',
     body: json !== undefined ? JSON.stringify(json) : form });
-  if (res.status === 401 && path !== '/api/auth/login') onSessionExpired();   // go to the login view
+  // 401: tell the session layer, which acts only if the user WAS logged in - the start-up 401 from
+  // GET /api/auth/me just means "show login". Complete, tested client: REACT_DEVELOPER_HANDOFF.html.
+  if (res.status === 401) onUnauthorized();
   return res;
 }
 ```
