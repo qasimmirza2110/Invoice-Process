@@ -1,0 +1,278 @@
+-- =====================================================================================================
+-- Invoice Process - complete schema for a FRESH, EMPTY PostgreSQL database (gate G2, docs/RENDER_DEPLOYMENT.md).
+--
+-- Schema version 1 = the 12 tables the application maps today (com.actify.invoice.entity.*, user.AppUser).
+-- The application never creates or alters tables (ddl-auto=validate, SchemaSafetyGuard); this script is the ONE
+-- reviewed way to create them, applied by the owner by hand, once, before the first start.
+--
+-- STATUS: statically checked against the JPA mappings (SchemaBootstrapScriptTest) and REHEARSED 2026-10-27 on the
+-- disposable scratch database invoice_process_bootstrap_scratch_db (since dropped): first run exit 0 (12 tables, 15 FKs,
+-- 4 unique, 13 indexes), second run refused before any change (schema dump identical), application started with
+-- ddl-auto=validate (0 schema errors) and passed a 37-check synthetic smoke test. Never applied to any other database.
+--
+-- Sources, so every definition can be reviewed against something that already exists:
+--   app_users, categories, reviewer_categories, upload_batches, extraction_jobs, gemini_call_attempts,
+--   invoice_review_reasons, invoice_workflow_events and the ix_invoices_* / ix_invoice_documents_sha256 indexes:
+--       copied from invoice-process-workflow-migration.sql (reviewed, executed 2026-10-23).
+--   invoice_documents, invoice_versions: copied from the reference DDL in invoice-versioning.sql (Part A).
+--   invoices, invoice_items: the columns, types and nullability Hibernate generates from Invoice / InvoiceItem
+--       (identical in the test and local-demo databases, pg_dump --schema-only 2026-10-27), with the foreign key
+--       given a readable name instead of Hibernate's generated one.
+--   The ONLY addition not found in any of those: ix_invoice_items_invoice (PostgreSQL does not index foreign keys,
+--       and every invoice read loads its items by invoice_id). It changes no data and no validation result.
+--
+-- Run it only with psql and ON_ERROR_STOP, as the database owner, against the EMPTY target database:
+--     psql -v ON_ERROR_STOP=1 -X -d "<connection>" -f invoice-process-bootstrap-schema.sql
+-- (pass the connection through PGHOST/PGPORT/PGDATABASE/PGUSER and PGPASSWORD or a password file - never type a
+--  password into a command line that is saved in shell history.)
+--
+-- Safety: the whole script is one transaction. The guard below stops it - before any change - when schema public
+-- already contains any table, view or sequence (counted in pg_catalog, so also objects of other roles) or the
+-- database is one of the local development databases. A second run therefore changes nothing. Even without
+-- ON_ERROR_STOP nothing is applied: after the guard's error PostgreSQL rejects every statement of the aborted
+-- transaction and the final COMMIT becomes a ROLLBACK. There is no DROP, TRUNCATE, DELETE or UPDATE anywhere in this file, and no data is inserted:
+-- the first ADMIN is created by the application from INVOICE_BOOTSTRAP_ADMIN_EMAIL / INVOICE_BOOTSTRAP_ADMIN_PASSWORD,
+-- categories are created by that admin through the API.
+--
+-- Timestamps are "timestamp without time zone" holding UTC wall-clock time (hibernate.jdbc.time_zone=UTC), exactly
+-- like every existing database of this application.
+-- =====================================================================================================
+
+BEGIN;
+-- Never wait behind another session: fail fast and roll back instead.
+SET LOCAL lock_timeout = '5s';
+
+-- ---------------------------------------------------------------- guard (no change happens before this passes)
+DO $guard$
+DECLARE
+    existing integer;
+BEGIN
+    IF current_database() IN ('Actify-Internship-Invoice-Process_db', 'Actify-Internship-Invoice-Process_test_db',
+                              'invoice_process_local_demo_db', 'invoice_process_migration_scratch_db') THEN
+        RAISE EXCEPTION 'bootstrap refused: % is a local development database, not a fresh target', current_database();
+    END IF;
+    -- pg_catalog, not information_schema: information_schema only lists objects this role has privileges on, so a
+    -- table owned by another role would be invisible there. Tables, partitioned tables, views, materialized views,
+    -- foreign tables and sequences all count.
+    SELECT count(*) INTO existing
+    FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S');
+    IF existing > 0 THEN
+        RAISE EXCEPTION 'bootstrap refused: schema public already contains % table/view/sequence object(s); this script is for an empty database only', existing;
+    END IF;
+END
+$guard$;
+
+-- ---------------------------------------------------------------- users and categories
+CREATE TABLE public.app_users (
+    id            bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    email         varchar(254) NOT NULL,           -- stored lower-case + trimmed by the application
+    display_name  varchar(100) NOT NULL,
+    password_hash varchar(100) NOT NULL,           -- BCrypt only, never plain text
+    role          varchar(20)  NOT NULL,           -- ADMIN | VENDOR | REVIEWER
+    enabled       boolean      NOT NULL,
+    token_version integer      NOT NULL,           -- raised to revoke every issued login token
+    created_at    timestamp without time zone NOT NULL,
+    updated_at    timestamp without time zone NOT NULL,
+    CONSTRAINT uk_app_users_email UNIQUE (email)
+);
+
+CREATE TABLE public.categories (
+    code         varchar(50)  PRIMARY KEY,         -- e.g. ELECTRONICS
+    display_name varchar(100) NOT NULL,
+    active       boolean      NOT NULL,
+    created_at   timestamp without time zone NOT NULL
+);
+
+CREATE TABLE public.reviewer_categories (
+    id            bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    user_id       bigint      NOT NULL,
+    category_code varchar(50) NOT NULL,
+    CONSTRAINT uk_reviewer_categories UNIQUE (user_id, category_code),
+    CONSTRAINT fk_reviewer_categories_user FOREIGN KEY (user_id) REFERENCES public.app_users(id),
+    CONSTRAINT fk_reviewer_categories_category FOREIGN KEY (category_code) REFERENCES public.categories(code)
+);
+
+-- ---------------------------------------------------------------- uploads and stored originals
+CREATE TABLE public.upload_batches (
+    id                    bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    owner_user_id         bigint       NOT NULL,
+    source                varchar(20)  NOT NULL,   -- LOCAL | GOOGLE_DRIVE | ONEDRIVE
+    label                 varchar(255),
+    default_category_code varchar(50),
+    status                varchar(10)  NOT NULL,   -- OPEN | CLOSED
+    accepted_count        integer      NOT NULL,
+    rejected_count        integer      NOT NULL,
+    rejections            jsonb        NOT NULL,   -- [{fileName, code, message}] - never file content
+    created_at            timestamp without time zone NOT NULL,
+    closed_at             timestamp without time zone,
+    CONSTRAINT fk_upload_batches_owner_user FOREIGN KEY (owner_user_id) REFERENCES public.app_users(id)
+);
+CREATE INDEX ix_upload_batches_owner ON public.upload_batches (owner_user_id, id);
+
+CREATE TABLE public.invoice_documents (
+    id                 varchar(36)  PRIMARY KEY,   -- generated UUID; also the private storage file name <id>.pdf
+    content_type       varchar(100) NOT NULL,
+    created_at         timestamp without time zone NOT NULL,
+    original_file_name varchar(255),               -- display metadata only, never a path
+    sha256             varchar(64)  NOT NULL,      -- of the exact uploaded bytes
+    size_bytes         bigint       NOT NULL
+);
+-- Duplicate-file checks use the document hash.
+CREATE INDEX ix_invoice_documents_sha256 ON public.invoice_documents (sha256);
+
+-- ---------------------------------------------------------------- invoices
+CREATE TABLE public.invoices (
+    id                     bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    invoice_number         varchar(255),
+    invoice_date           date,
+    seller_name            varchar(255),
+    seller_tax_id          varchar(255),
+    buyer_name             varchar(255),
+    buyer_tax_id           varchar(255),
+    currency               varchar(3),
+    subtotal               numeric(19,2),
+    discount_amount        numeric(19,2),
+    shipping_amount        numeric(19,2),
+    tax_amount             numeric(19,2),
+    total_amount           numeric(19,2),
+    source_file_name       varchar(255),
+    source_file_size       bigint,
+    source_document_id     varchar(36),            -- null for legacy invoices without a stored original
+    raw_llm_response       text,
+    status                 varchar(20)  NOT NULL,  -- InvoiceStatus name
+    owner_user_id          bigint,                 -- null = legacy invoice (ADMIN only)
+    batch_id               bigint,
+    category_code          varchar(50),
+    assigned_reviewer_id   bigint,
+    submitted_version      integer,
+    failure_reason         varchar(1000),
+    gemini_model_id        varchar(100),
+    gemini_model_version   varchar(100),
+    prompt_token_count     bigint,
+    candidates_token_count bigint,
+    thoughts_token_count   bigint,
+    total_token_count      bigint,
+    extraction_duration_ms bigint,
+    created_at             timestamp without time zone NOT NULL,
+    updated_at             timestamp without time zone NOT NULL,
+    CONSTRAINT fk_invoices_source_document FOREIGN KEY (source_document_id) REFERENCES public.invoice_documents(id),
+    CONSTRAINT fk_invoices_owner_user FOREIGN KEY (owner_user_id) REFERENCES public.app_users(id),
+    CONSTRAINT fk_invoices_upload_batch FOREIGN KEY (batch_id) REFERENCES public.upload_batches(id),
+    CONSTRAINT fk_invoices_assigned_reviewer FOREIGN KEY (assigned_reviewer_id) REFERENCES public.app_users(id)
+);
+CREATE INDEX ix_invoices_status ON public.invoices (status);
+CREATE INDEX ix_invoices_owner ON public.invoices (owner_user_id, id);
+CREATE INDEX ix_invoices_reviewer ON public.invoices (assigned_reviewer_id, status);
+CREATE INDEX ix_invoices_batch ON public.invoices (batch_id);
+
+CREATE TABLE public.invoice_items (
+    id          bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    invoice_id  bigint        NOT NULL,
+    description varchar(1000),
+    quantity    numeric(19,3),
+    unit_price  numeric(19,2),
+    tax_rate    numeric(7,3),
+    line_total  numeric(19,2),
+    CONSTRAINT fk_invoice_items_invoice FOREIGN KEY (invoice_id) REFERENCES public.invoices(id)
+);
+CREATE INDEX ix_invoice_items_invoice ON public.invoice_items (invoice_id, id);
+
+CREATE TABLE public.invoice_versions (
+    id                 bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    invoice_id         bigint       NOT NULL,
+    version_number     integer      NOT NULL,
+    change_source      varchar(30)  NOT NULL,      -- LLM_EXTRACTION | MANUAL_EDIT | LEGACY_BASELINE
+    change_reason      varchar(500),
+    changed_by         varchar(100),
+    snapshot_data      jsonb        NOT NULL,      -- complete invoice header + ordered line items
+    changed_fields     jsonb,                      -- NULL for V1 / legacy baseline
+    source_document_id varchar(36),
+    created_at         timestamp without time zone NOT NULL,
+    -- The unique index (invoice_id, version_number) also serves "ORDER BY version_number DESC".
+    CONSTRAINT uk_invoice_versions_invoice_version UNIQUE (invoice_id, version_number),
+    CONSTRAINT fk_invoice_versions_invoice FOREIGN KEY (invoice_id) REFERENCES public.invoices(id),
+    CONSTRAINT fk_invoice_versions_source_document FOREIGN KEY (source_document_id) REFERENCES public.invoice_documents(id)
+);
+
+-- ---------------------------------------------------------------- extraction queue and Gemini accounting
+CREATE TABLE public.extraction_jobs (
+    invoice_id         bigint PRIMARY KEY,         -- one job per batch invoice
+    queued_at          timestamp without time zone NOT NULL,   -- FIFO order (kept on retry)
+    next_attempt_at    timestamp without time zone NOT NULL,   -- back-off / daily reset
+    attempt_count      integer NOT NULL,
+    max_attempts       integer NOT NULL,
+    claimed_at         timestamp without time zone,
+    claimed_by         varchar(100),
+    last_error_code    varchar(50),
+    last_error_message varchar(500),               -- client-safe text only
+    finished_at        timestamp without time zone,
+    CONSTRAINT fk_extraction_jobs_invoice FOREIGN KEY (invoice_id) REFERENCES public.invoices(id)
+);
+CREATE INDEX ix_extraction_jobs_eligible ON public.extraction_jobs (next_attempt_at, queued_at, invoice_id);
+
+CREATE TABLE public.gemini_call_attempts (
+    id                     bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    invoice_id             bigint       NOT NULL,
+    attempt_number         integer      NOT NULL,
+    caller                 varchar(20)  NOT NULL,  -- WORKER | LEGACY_EXTRACT
+    started_at             timestamp without time zone NOT NULL,
+    finished_at            timestamp without time zone,
+    model_id               varchar(100) NOT NULL,
+    model_version          varchar(100),
+    http_status            integer,
+    outcome                varchar(20)  NOT NULL,  -- IN_FLIGHT | SUCCESS | RETRYABLE_ERROR | DAILY_QUOTA | PERMANENT_ERROR | UNKNOWN
+    error_code             varchar(200),
+    prompt_token_count     bigint,                 -- as REPORTED by Gemini; null when not reported
+    candidates_token_count bigint,
+    thoughts_token_count   bigint,
+    total_token_count      bigint,
+    estimated_input_tokens integer      NOT NULL,  -- this app's pacing estimate, never shown as usage
+    duration_ms            bigint,
+    CONSTRAINT uk_gemini_attempts_invoice_attempt UNIQUE (invoice_id, attempt_number),
+    CONSTRAINT fk_gemini_attempts_invoice FOREIGN KEY (invoice_id) REFERENCES public.invoices(id)
+);
+CREATE INDEX ix_gemini_attempts_started ON public.gemini_call_attempts (started_at);
+
+-- ---------------------------------------------------------------- review workflow
+CREATE TABLE public.invoice_review_reasons (
+    id             bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    invoice_id     bigint        NOT NULL,
+    version_number integer       NOT NULL,
+    code           varchar(40)   NOT NULL,
+    field          varchar(100),
+    message        varchar(1000) NOT NULL,
+    created_at     timestamp without time zone NOT NULL,
+    CONSTRAINT fk_review_reasons_invoice FOREIGN KEY (invoice_id) REFERENCES public.invoices(id)
+);
+CREATE INDEX ix_review_reasons_invoice ON public.invoice_review_reasons (invoice_id, version_number);
+CREATE INDEX ix_review_reasons_code ON public.invoice_review_reasons (code);
+
+CREATE TABLE public.invoice_workflow_events (
+    id             bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    invoice_id     bigint      NOT NULL,
+    from_status    varchar(20),
+    to_status      varchar(20) NOT NULL,
+    actor_user_id  bigint,                         -- null = the system (extraction worker)
+    version_number integer,
+    reason         varchar(500),
+    created_at     timestamp without time zone NOT NULL,
+    CONSTRAINT fk_workflow_events_invoice FOREIGN KEY (invoice_id) REFERENCES public.invoices(id),
+    CONSTRAINT fk_workflow_events_actor FOREIGN KEY (actor_user_id) REFERENCES public.app_users(id)
+);
+CREATE INDEX ix_workflow_events_invoice ON public.invoice_workflow_events (invoice_id, id);
+CREATE INDEX ix_workflow_events_to_status ON public.invoice_workflow_events (to_status, created_at);
+
+COMMIT;
+
+-- ---------------------------------------------------------------- READ-ONLY checks after the bootstrap
+-- 12 tables (expect 12), all empty (expect 0 each):
+SELECT count(*) AS tables FROM information_schema.tables WHERE table_schema = 'public';
+SELECT (SELECT count(*) FROM public.app_users)               AS app_users,
+       (SELECT count(*) FROM public.invoices)                AS invoices,
+       (SELECT count(*) FROM public.invoice_items)           AS invoice_items,
+       (SELECT count(*) FROM public.invoice_documents)       AS invoice_documents;
+-- 15 foreign keys, 4 unique constraints, 13 secondary indexes (expect these numbers):
+SELECT contype, count(*) FROM pg_constraint WHERE connamespace = 'public'::regnamespace AND contype IN ('f', 'u')
+GROUP BY contype ORDER BY contype;
+SELECT count(*) AS secondary_indexes FROM pg_indexes WHERE schemaname = 'public' AND indexname LIKE 'ix\_%';

@@ -40,6 +40,27 @@ class AppUserServiceTest {
     }
 
     @Test
+    void theFreeDemoAcceptsOnlySyntheticExampleTestAccounts() {
+        AppUserService demo = new AppUserService(repository, encoder, true);
+        assertThatThrownBy(() -> demo.createUser("owner@real-domain.example", "Owner", Role.ADMIN, "a-valid-password-1"))
+                .isInstanceOf(InvalidRequestException.class)
+                .hasMessageContaining("only synthetic @example.test");
+
+        when(repository.existsByEmail("vendor.one@example.test")).thenReturn(false);
+        when(repository.save(any(AppUser.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        assertThat(demo.createUser(" Vendor.One@Example.TEST ", "Vendor One", Role.VENDOR, "a-valid-password-1")
+                .getEmail()).isEqualTo("vendor.one@example.test");
+    }
+
+    @Test
+    void outsideTheDemoRealDomainsStayAllowed() {
+        when(repository.existsByEmail("owner@company.example")).thenReturn(false);
+        when(repository.save(any(AppUser.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        assertThat(service.createUser("owner@company.example", "Owner", Role.ADMIN, "a-valid-password-1").getEmail())
+                .isEqualTo("owner@company.example");
+    }
+
+    @Test
     void emailIsTrimmedAndLowerCasedWithAFixedLocale() {
         assertThat(AppUserService.normalizeEmail("  Admin.ONE@Example.TEST ")).isEqualTo("admin.one@example.test");
         assertThat(AppUserService.normalizeEmail(null)).isEmpty();

@@ -41,7 +41,9 @@ class ApiOnlySurfaceWebTest {
         mvc.perform(get("/api/health"))
                 .andExpect(status().isOk())
                 .andExpect(content().json("{\"status\":\"UP\"}", true))
-                .andExpect(header().string("Cache-Control", containsString("no-store")));
+                .andExpect(header().string("Cache-Control", containsString("no-store")))
+                // The free-demo marker exists only under the render-free-demo profile (FreeDemoSurfaceWebTest).
+                .andExpect(header().doesNotExist("X-Invoice-Demo"));
         // A stale or broken login cookie must never make the platform think the service is down.
         mvc.perform(get("/api/health").cookie(new Cookie(AuthCookies.AUTH_COOKIE, "garbage")))
                 .andExpect(status().isOk());

@@ -4,6 +4,8 @@ import com.actify.invoice.quota.QuotaSettings;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.context.EnvironmentAware;
 import org.springframework.core.Ordered;
 import org.springframework.core.PriorityOrdered;
@@ -82,8 +84,10 @@ public class SchemaSafetyGuard implements BeanFactoryPostProcessor, EnvironmentA
     /** Static and side-effect free, so it can be unit-tested with any Environment. */
     public static void check(Environment env) {
         if (isIsolatedTestRun(env)) {
-            return; // rule 1
+            return; // rule 1 (PgTestDatabaseGuard then checks the REAL connection with current_database())
         }
+        // Every rule below approves spring.datasource.url - so nothing may replace that URL behind its back.
+        requireNoDataSourceRedirect(env);
         if (Arrays.asList(effectiveProfiles(env)).contains(LOCAL_DEMO_PROFILE)) {
             checkLocalDemo(env); // rule 1b
             return;
@@ -203,6 +207,40 @@ public class SchemaSafetyGuard implements BeanFactoryPostProcessor, EnvironmentA
     }
 
     /** Rule 3: no setting may let Hibernate or Spring change the schema. */
+    /**
+     * Spring Boot binds spring.datasource.hikari.* onto the pool AFTER spring.datasource.url, so a Hikari jdbc-url
+     * (e.g. the environment variable SPRING_DATASOURCE_HIKARI_JDBCURL) silently replaces the URL approved below; a
+     * data-source class/JNDI name or a JNDI/other pool type bypasses the URL entirely. None of these is used by this
+     * application, so each is refused. Looked up through Spring's relaxed Binder - the same rules Spring Boot uses to
+     * configure the pool - so every environment-variable spelling is caught. Values are never echoed.
+     * Proven by DataSourceRedirectGuardTest.
+     */
+    static void requireNoDataSourceRedirect(Environment env) {
+        if (!(env instanceof ConfigurableEnvironment)) {
+            return; // only possible in hand-made test environments; Spring always passes a ConfigurableEnvironment
+        }
+        Binder binder = Binder.get(env);
+        for (String key : DATA_SOURCE_REDIRECT_KEYS) {
+            if (binder.bind(key, Bindable.of(String.class)).isBound()) {
+                throw refuse(key + " is set. It would redirect the database connection away from the approved "
+                        + "spring.datasource.url (INVOICE_DB_URL); remove it and put connection options into the URL");
+            }
+        }
+        if (binder.bind("spring.datasource.hikari.data-source-properties",
+                Bindable.mapOf(String.class, String.class)).isBound()) {
+            throw refuse("spring.datasource.hikari.data-source-properties is set. It could redirect the database "
+                    + "connection away from the approved spring.datasource.url; put connection options into the URL");
+        }
+    }
+
+    private static final String[] DATA_SOURCE_REDIRECT_KEYS = {
+            "spring.datasource.hikari.jdbc-url",
+            "spring.datasource.hikari.data-source-class-name",
+            "spring.datasource.hikari.data-source-j-n-d-i",
+            "spring.datasource.jndi-name",
+            "spring.datasource.type",
+    };
+
     static void requireNonMutatingSchemaSettings(Environment env) {
         requireOneOf(env, "spring.jpa.hibernate.ddl-auto", "validate", "none");
         requireOneOf(env, "spring.jpa.properties.hibernate.hbm2ddl.auto", "validate", "none");
