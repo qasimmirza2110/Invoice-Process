@@ -7,7 +7,7 @@ No other database has been changed; the app refuses to start against one until t
 
 | Phase | What | Main classes |
 |---|---|---|
-| 1 | Login with a JWT in an HttpOnly cookie, CSRF, roles ADMIN / VENDOR / REVIEWER, per-object access (404 for other users' data), startup guard | `security/*`, `user/*`, `config/SchemaSafetyGuard` |
+| 1 | Login with a JWT sent as `Authorization: Bearer` (no cookie, no CSRF), roles ADMIN / VENDOR / REVIEWER, per-object access (404 for other users' data), startup guard | `security/*`, `user/*`, `config/SchemaSafetyGuard` |
 | 2 | Batch upload (one PDF per request, ≤100 per batch), PostgreSQL queue, worker, review reasons, workflow events | `intake/*`, `queue/*`, `workflow/*`, `validation/StorableValues` |
 | 3 | One shared Gemini pacer (RPM / input TPM / RPD per model), one row per Gemini call, at most 3 attempts per job (1 initial + 2 retries, `invoice.worker.max-attempts`), daily-quota pause | `quota/*`, `entity/GeminiCallAttempt` |
 | 4 | Categories, reviewer↔category mapping, admin assignment, reviewer corrections, submit gate | `review/ReviewAssignmentService`, `review/ReviewService` |
@@ -50,7 +50,8 @@ Someone else's object answers **404** (same as "does not exist"); a wrong role o
 | `INVOICE_DB_URL`, `INVOICE_DB_USERNAME`, `INVOICE_DB_PASSWORD` | per database | Connection settings (the password may come from pgpass instead). |
 | `INVOICE_WORKER_ENABLED` | to process queues | `true` starts the background worker… |
 | `GEMINI_LIMIT_RPM`, `GEMINI_LIMIT_TPM`, `GEMINI_LIMIT_RPD`, `GEMINI_INITIAL_TOKEN_ESTIMATE` | for the worker | …but only when these real limits (from AI Studio, for the configured model) are set. No defaults on purpose. |
-| `INVOICE_COOKIE_SECURE` | behind TLS | `true` adds the `Secure` flag on plain-HTTP proxies (HTTPS requests get it automatically). |
+| `INVOICE_GEMINI_PAID_TIER_CONFIRMED` | extraction outside the local demo | `true` only after checking that the Gemini key's Google Cloud project has active billing; until then the worker sends nothing. |
+| `INVOICE_CORS_ALLOWED_ORIGINS` | separately hosted frontend only | exact origins; empty = no CORS. |
 | `INVOICE_GOOGLE_CLIENT_ID`, `INVOICE_GOOGLE_API_KEY`, `INVOICE_GOOGLE_APP_ID` | Google Drive picker | public browser values; setup in the runbook section 12. Empty = "Not configured". |
 | `INVOICE_ONEDRIVE_ACCOUNT_TYPE`, `INVOICE_ONEDRIVE_CLIENT_ID` (+ `INVOICE_ONEDRIVE_TENANT_ID`, `INVOICE_ONEDRIVE_SHAREPOINT_BASE_URL` for work/school) | OneDrive picker | account type is the owner's decision (PERSONAL or WORK_OR_SCHOOL). |
 | `INVOICE_GOOGLE_LIVE_TESTED`, `INVOICE_ONEDRIVE_LIVE_TESTED` | after an approved live test only | `true` changes the shown status to "tested with a real account". |
@@ -79,9 +80,8 @@ Count tests from the Maven summary line (`Tests run: N` at the end), not from `t
 keeps old pgtest reports from earlier runs.
 
 Postman (`postman/Invoice-Process.postman_collection.json`): run **"00 - Login"** first (set `adminEmail` /
-`adminPassword` in the environment, test/demo admin only). Its first request (`GET /api/health`) stores the `XSRF-TOKEN`
-cookie; a collection-level script copies the current cookie into `xsrfToken` after every response (login rotates the
-token), and every write sends it as `X-XSRF-TOKEN`. **The collection has not been run against a running app**, so this
+`adminPassword` in the environment, test/demo admin only). Login stores the returned `accessToken` in a collection
+variable for that run; a collection pre-request script sends it as `Authorization: Bearer` on every request. **The collection has not been run against a running app**, so this
 is unverified. Folders 01, 03, 05, 07, 09 and 11 are read-only. Folders 02, 04 and 08 use the batch upload API and write
 (batch, stored PDFs, rejection records) but never call Gemini; 10b writes a version of a legacy invoice – manual only.
 

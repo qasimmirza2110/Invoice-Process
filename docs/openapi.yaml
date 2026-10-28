@@ -4,17 +4,22 @@ info:
   version: 0.0.1-SNAPSHOT
   description: |
     API-only backend for invoice upload, Gemini extraction, human review and approval.
-    Written by hand from the source code on 2026-10-27 (no springdoc dependency). The prose reference with business
-    rules, side effects and tests is docs/REACT_BACKEND_HANDOFF.md; if the two disagree, the code is right.
+    Written by hand from the source code (no springdoc dependency); updated 2026-10-28 for the Bearer-token release.
+    The prose reference with business rules, side effects and tests is docs/REACT_BACKEND_HANDOFF.md; if the two
+    disagree, the code is right.
 
-    Authentication: HttpOnly cookie INVOICE_PROCESS_AUTH set by POST /api/auth/login (JWT, 30 min).
-    CSRF: every POST/PUT/DELETE must send header X-XSRF-TOKEN equal to the readable XSRF-TOKEN cookie.
-    Same-origin only: no CORS headers are sent.
+    Authentication: POST /api/auth/login returns accessToken (JWT, 30 min) in the JSON body. Every other call except
+    GET /api/health sends "Authorization: Bearer <accessToken>". No cookies, no CSRF token, no server session.
+    401 = missing/invalid/expired/revoked token or disabled account; 403 = valid token, wrong role.
+    CORS: none by default (same origin or dev proxy); the owner may allow exact origins with INVOICE_CORS_ALLOWED_ORIGINS.
+    Uploads: any valid invoice PDF up to 10 MB, one file per request, up to 100 accepted files per batch.
 servers:
   - url: http://127.0.0.1:8088
     description: Local demo (loopback only)
+  - url: https://invoice-process.onrender.com
+    description: Render service (check which release is deployed - see REACT_BACKEND_HANDOFF.md section 1.4)
 security:
-  - authCookie: []
+  - bearerAuth: []
 tags:
   - name: health
   - name: auth
@@ -40,9 +45,9 @@ paths:
   /api/auth/login:
     post:
       tags: [auth]
-      summary: 'Log in; sets INVOICE_PROCESS_AUTH and a fresh XSRF-TOKEN cookie'
+      summary: 'Log in; returns a Bearer access token in the body (no cookie is set)'
+      description: 'Public. An Authorization header on this request is ignored. 401 is one generic message for wrong password, unknown e-mail and disabled account; 429 after 5 failures (15 min).'
       security: []
-      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
       requestBody:
         required: true
         content:
@@ -50,32 +55,18 @@ paths:
             schema: { $ref: '#/components/schemas/LoginRequest' }
       responses:
         '200':
-          description: Logged in
-          headers:
-            Set-Cookie: { schema: { type: string }, description: 'INVOICE_PROCESS_AUTH=<jwt>; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800' }
-          content: { application/json: { schema: { $ref: '#/components/schemas/Me' } } }
+          description: Logged in (Cache-Control no-store)
+          content: { application/json: { schema: { $ref: '#/components/schemas/LoginResponse' } } }
         '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
         '415': { $ref: '#/components/responses/Error' }
         '429': { $ref: '#/components/responses/Error' }
-  /api/auth/logout:
-    post:
-      tags: [auth]
-      summary: 'Delete the auth cookie in this browser (works with an expired session)'
-      security: []
-      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
-      responses:
-        '204': { description: Logged out }
-        '403': { $ref: '#/components/responses/Error' }
   /api/auth/logout-all:
     post:
       tags: [auth]
-      summary: 'Revoke every token of the current user (token version +1)'
-      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
+      summary: 'Revoke every token of the current user (token version +1). Single-browser logout = forget the token client-side.'
       responses:
-        '204': { description: All sessions ended }
+        '204': { description: All tokens of this user revoked }
         '401': { $ref: '#/components/responses/Error' }
-        '403': { $ref: '#/components/responses/Error' }
   /api/auth/me:
     get:
       tags: [auth]
@@ -88,7 +79,6 @@ paths:
     post:
       tags: [batches]
       summary: 'Create an upload batch (VENDOR, ADMIN)'
-      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/CreateBatchRequest' } } }
@@ -118,7 +108,7 @@ paths:
     post:
       tags: [batches]
       summary: 'Upload ONE PDF into the batch; 202 accepted and queued, 422 rejected'
-      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
       requestBody:
         required: true
         content:
@@ -132,15 +122,16 @@ paths:
                 source: { type: string, enum: [LOCAL, GOOGLE_DRIVE, ONEDRIVE] }
       responses:
         '202': { description: Accepted and queued, content: { application/json: { schema: { $ref: '#/components/schemas/FileIntakeResponse' } } } }
-        '422': { description: 'Rejected (INVALID_FILE, DUPLICATE_FILE, NESTED_FOLDER, SOURCE_MISMATCH; free demo only: NOT_A_DEMO_FIXTURE)', content: { application/json: { schema: { $ref: '#/components/schemas/FileIntakeResponse' } } } }
+        '422': { description: 'Rejected (INVALID_FILE, DUPLICATE_FILE, NESTED_FOLDER, SOURCE_MISMATCH; INVALID_FILE also covers damaged or password-protected PDFs)', content: { application/json: { schema: { $ref: '#/components/schemas/FileIntakeResponse' } } } }
         '400': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+        '500': { description: 'PDF storage (private bucket) or database unavailable, e.g. message "Could not store the original PDF". Nothing was accepted or queued; retrying later never creates a duplicate', content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
   /api/batches/{id}/close:
     post:
       tags: [batches]
       summary: 'Close the batch (no more files)'
-      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
       responses:
         '200': { description: Closed, content: { application/json: { schema: { $ref: '#/components/schemas/BatchSummary' } } } }
         '404': { $ref: '#/components/responses/Error' }
@@ -182,7 +173,7 @@ paths:
     put:
       tags: [review]
       summary: 'Save a complete correction as a new version (assigned REVIEWER; ADMIN on legacy invoices only)'
-      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/InvoiceUpdate' } } }
@@ -276,7 +267,7 @@ paths:
     post:
       tags: [review]
       summary: 'Assigned REVIEWER submits an exact version for approval'
-      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DecisionRequest' } } } }
       responses:
         '200': { description: PENDING_APPROVAL, content: { application/json: { schema: { $ref: '#/components/schemas/Invoice' } } } }
@@ -288,42 +279,41 @@ paths:
     post:
       tags: [admin]
       summary: 'ADMIN approves the submitted, current version (reason optional)'
-      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DecisionRequest' } } } }
       responses: { '200': { $ref: '#/components/responses/Invoice' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
   /api/invoices/{id}/reject:
     post:
       tags: [admin]
       summary: 'ADMIN rejects the submitted, current version (reason required)'
-      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DecisionRequest' } } } }
       responses: { '200': { $ref: '#/components/responses/Invoice' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
   /api/invoices/{id}/send-back:
     post:
       tags: [admin]
       summary: 'ADMIN returns a PENDING_APPROVAL invoice to the reviewer (reason required)'
-      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DecisionRequest' } } } }
       responses: { '200': { $ref: '#/components/responses/Invoice' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
   /api/invoices/{id}/reopen:
     post:
       tags: [admin]
       summary: 'ADMIN reopens an APPROVED/REJECTED invoice (reason required)'
-      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DecisionRequest' } } } }
       responses: { '200': { $ref: '#/components/responses/Invoice' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
   /api/invoices/{id}/requeue:
     post:
       tags: [admin]
       summary: 'ADMIN puts a FAILED batch invoice back into the queue (reason required)'
-      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DecisionRequest' } } } }
       responses: { '200': { $ref: '#/components/responses/Invoice' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
   /api/invoices/extract:
     post:
       tags: [admin]
       summary: 'LEGACY single-file extraction (ADMIN; calls Gemini synchronously; 409 when switched off)'
-      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
       requestBody:
         required: true
         content:
@@ -352,7 +342,6 @@ paths:
     post:
       tags: [admin]
       summary: 'Create a category (ADMIN)'
-      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
       requestBody:
         required: true
         content:
@@ -368,7 +357,6 @@ paths:
       summary: 'Activate / deactivate a category (ADMIN)'
       parameters:
         - { name: code, in: path, required: true, schema: { type: string } }
-        - { $ref: '#/components/parameters/Csrf' }
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, required: [active], properties: { active: { type: boolean } } } } }
@@ -380,7 +368,7 @@ paths:
     put:
       tags: [admin]
       summary: 'Set or clear an invoice''s category (ADMIN)'
-      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, properties: { categoryCode: { type: string, nullable: true } } } } }
@@ -395,7 +383,6 @@ paths:
     post:
       tags: [admin]
       summary: 'Assign / reassign / unassign a reviewer for 1-200 invoices (ADMIN)'
-      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AssignmentRequest' } } } }
       responses:
         '200':
@@ -418,7 +405,6 @@ paths:
     post:
       tags: [admin]
       summary: 'Create a user (ADMIN)'
-      parameters: [ { $ref: '#/components/parameters/Csrf' } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CreateUserRequest' } } } }
       responses:
         '201': { description: Created, content: { application/json: { schema: { $ref: '#/components/schemas/User' } } } }
@@ -428,21 +414,21 @@ paths:
     put:
       tags: [admin]
       summary: 'Change role (ADMIN; ends the user''s sessions)'
-      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
       requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { role: { $ref: '#/components/schemas/Role' } } } } } }
       responses: { '200': { $ref: '#/components/responses/User' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
   /api/admin/users/{id}/display-name:
     put:
       tags: [admin]
       summary: 'Rename (ADMIN; blank = e-mail name)'
-      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
       requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { displayName: { type: string, maxLength: 100 } } } } } }
       responses: { '200': { $ref: '#/components/responses/User' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' } }
   /api/admin/users/{id}/enabled:
     put:
       tags: [admin]
       summary: 'Enable / disable (ADMIN; disabling ends the user''s sessions)'
-      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [enabled], properties: { enabled: { type: boolean } } } } } }
       responses: { '200': { $ref: '#/components/responses/User' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
   /api/admin/users/{id}/categories:
@@ -456,7 +442,7 @@ paths:
     put:
       tags: [admin]
       summary: 'Replace a reviewer''s category list (ADMIN)'
-      parameters: [ { $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/Csrf' } ]
+      parameters: [ { $ref: '#/components/parameters/Id' } ]
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, properties: { categories: { type: array, items: { type: string } } } } } }
@@ -487,18 +473,13 @@ paths:
 
 components:
   securitySchemes:
-    authCookie:
-      type: apiKey
-      in: cookie
-      name: INVOICE_PROCESS_AUTH
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'accessToken from POST /api/auth/login, sent as "Authorization: Bearer <token>". Only this header is read (never a cookie, query parameter or body).'
   parameters:
     Id: { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
-    Csrf:
-      name: X-XSRF-TOKEN
-      in: header
-      required: true
-      description: Value of the XSRF-TOKEN cookie (missing or wrong = 403)
-      schema: { type: string }
     Days: { name: days, in: query, schema: { type: integer, default: 7, minimum: 1, maximum: 90 } }
   responses:
     Error:
@@ -535,6 +516,14 @@ components:
       type: object
       required: [email, password]
       properties: { email: { type: string, format: email }, password: { type: string, format: password } }
+    LoginResponse:
+      type: object
+      properties:
+        accessToken: { type: string, description: 'HS256 JWT. Keep in memory; send as Authorization: Bearer <accessToken>' }
+        tokenType: { type: string, enum: [Bearer] }
+        expiresIn: { type: integer, format: int64, description: 'Seconds until the token expires (default 1800)', example: 1800 }
+        expiresAt: { type: string, format: date-time, example: '2026-10-28T10:30:00Z' }
+        user: { $ref: '#/components/schemas/Me' }
     Me:
       type: object
       properties:
@@ -604,7 +593,7 @@ components:
         accepted: { type: boolean }
         invoiceId: { type: integer, format: int64, nullable: true }
         status: { allOf: [ { $ref: '#/components/schemas/InvoiceStatus' } ], nullable: true }
-        code: { type: string, nullable: true, enum: [INVALID_FILE, DUPLICATE_FILE, NESTED_FOLDER, SOURCE_MISMATCH, NOT_A_DEMO_FIXTURE, null], description: "NOT_A_DEMO_FIXTURE only in the temporary free demo (render-free-demo): the file is not one of the published synthetic fixture PDFs" }
+        code: { type: string, nullable: true, enum: [INVALID_FILE, DUPLICATE_FILE, NESTED_FOLDER, SOURCE_MISMATCH, null], description: "INVALID_FILE: empty, over 10 MB, not .pdf, wrong content type, not a PDF signature, damaged/incomplete, or password-protected" }
         message: { type: string }
     CloudSource:
       type: object

@@ -28,7 +28,7 @@ import org.apache.catalina.connector.ClientAbortException;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 
-import javax.servlet.http.Cookie;
+import org.springframework.test.web.servlet.request.RequestPostProcessor;
 
 import java.math.BigDecimal;
 
@@ -39,7 +39,6 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
@@ -76,9 +75,9 @@ class InvoiceControllerTest {
 
     @BeforeEach
     void loginAsAdmin() {
-        Cookie admin = TestLogins.cookieFor(TestLogins.user(1, Role.ADMIN), userRepository, tokenService);
+        RequestPostProcessor admin = TestLogins.bearerFor(TestLogins.user(1, Role.ADMIN), userRepository, tokenService);
         mockMvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity())
-                .defaultRequest(get("/").cookie(admin).with(csrf())).build();
+                .defaultRequest(get("/").with(admin)).build();
     }
 
     @MockBean

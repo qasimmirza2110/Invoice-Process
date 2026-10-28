@@ -12,11 +12,12 @@ Vendor uploads PDFs → PostgreSQL queue → worker → Gemini (one call per PDF
 **Status:** tested with mocks and an isolated PostgreSQL test database. Container deployment to Render is *prepared*
 (`Dockerfile`, `render` profile, [`docs/RENDER_DEPLOYMENT.md`](docs/RENDER_DEPLOYMENT.md)) but has **not** been
 performed, and it is **not cleared for real customer invoices** until the release gates in that guide are met
-(persistent PDF storage, reviewed schema bootstrap, backups).
+(a private PDF bucket, the schema applied, backups). The free target is the existing Render service plus Neon
+PostgreSQL and a private Neon Object Storage bucket.
 
 | Document | For |
 |---|---|
-| [`docs/REACT_BACKEND_HANDOFF.md`](docs/REACT_BACKEND_HANDOFF.md) | frontend developers: every route, JSON shape, error, cookie/CSRF rule and React flow |
+| [`docs/REACT_BACKEND_HANDOFF.md`](docs/REACT_BACKEND_HANDOFF.md) | frontend developers: every route, JSON shape, error, Bearer-token rule and React flow |
 | [`docs/openapi.yaml`](docs/openapi.yaml) | the same contract, machine-readable (OpenAPI 3.0) |
 | [`docs/RENDER_DEPLOYMENT.md`](docs/RENDER_DEPLOYMENT.md) | deploying the container to Render, environment variables, database, PDF storage, operations |
 | [`docs/WORKFLOW_AND_OPERATIONS.md`](docs/WORKFLOW_AND_OPERATIONS.md) | workflow rules, approval gates, local demo |
@@ -25,9 +26,13 @@ performed, and it is **not cleared for real customer invoices** until the releas
 
 ## 1. Features
 
-- **Login and roles** – JWT in the HttpOnly cookie `INVOICE_PROCESS_AUTH`, CSRF protection (`XSRF-TOKEN` cookie +
-  `X-XSRF-TOKEN` header), roles `ADMIN`, `VENDOR`, `REVIEWER`. Access is checked on the server for every object:
-  another user's invoice answers `404`.
+- **Login and roles** – `POST /api/auth/login` returns a JWT access token; every other call sends
+  `Authorization: Bearer <token>` (no cookies, no CSRF token, no server session). Roles `ADMIN`, `VENDOR`, `REVIEWER`;
+  no sign-up — an ADMIN creates accounts. Access is checked on the server for every object: another user's invoice
+  answers `404`.
+- **Real invoice PDFs** – any valid PDF ≤ 10 MB is accepted (extension, content type, signature and a real PDF parse;
+  damaged or password-protected files are refused). Originals are stored privately under random names and never
+  changed.
 - **Batch upload** – one PDF per request, up to 100 files per batch, a PostgreSQL job queue
   (`FOR UPDATE SKIP LOCKED`) and a background worker that is **off by default**.
 - **Gemini pacing** – one shared pacer for requests per minute, input tokens per minute and requests per day, per
@@ -49,13 +54,13 @@ Data JPA / Hibernate 5.6, PostgreSQL, Jackson, RestTemplate, Gemini API (`gemini
 wrapper included. Container image: Maven 3.9.16 / Eclipse Temurin 17 JRE (see `Dockerfile`).
 
 Spring Boot 2.7 is past its open-source support window. An upgrade (Boot 3.x needs Java 17 and the `javax` → `jakarta`
-migration) is a separate, planned project — see [`docs/RENDER_DEPLOYMENT.md`](docs/RENDER_DEPLOYMENT.md#11-planned-improvements).
+migration) is a separate, planned project — see [`docs/RENDER_DEPLOYMENT.md`](docs/RENDER_DEPLOYMENT.md#14-planned-improvements).
 
 ## 3. Architecture
 
 ```
-React frontend (separate project, same origin)  /  Postman
-  → Spring Security: JwtCookieAuthenticationFilter + CSRF + role rules (default deny)
+React frontend (separate project; same origin or allowed CORS origin)  /  Postman
+  → Spring Security: JwtBearerAuthenticationFilter + role rules (default deny)
   → controller/  HTTP only
   → intake/      BatchIntakeService      file checks, private PDF storage, invoice + job in one transaction
   → queue/       ExtractionWorker        claims jobs with FOR UPDATE SKIP LOCKED
@@ -63,7 +68,7 @@ React frontend (separate project, same origin)  /  Postman
   → llm/         GeminiInvoiceExtractor  one generateContent call, structured output
   → validation/  InvoiceExtractionValidator  business rules with BigDecimal
   → review/, service/, versioning/, workflow/   assignment, corrections, versions, approval, status machine
-  → PostgreSQL  +  private PDF folder (invoice.storage.dir)
+  → PostgreSQL  +  original PDFs: private folder (local) or private S3 bucket (render)
 ```
 
 `config/SchemaSafetyGuard` runs before any database connection is created (section 6).
@@ -80,16 +85,21 @@ Spring Boot does not read `.env` files.
 | `INVOICE_DB_URL`, `INVOICE_DB_USERNAME`, `INVOICE_DB_PASSWORD` | yes | PostgreSQL connection; locally the password may come from `pgpass.conf`. |
 | `INVOICE_LIVE_START_APPROVED`, `INVOICE_APPROVED_DATABASE` | any non-demo start | See section 6. |
 | `INVOICE_BOOTSTRAP_ADMIN_EMAIL`, `INVOICE_BOOTSTRAP_ADMIN_PASSWORD` | first start only | Creates the first ADMIN when none exists. Remove afterwards. |
-| `INVOICE_STORAGE_DIR` | locally optional, **required in `render`** | Private folder for the original PDFs; absolute path. |
+| `INVOICE_STORAGE_DIR` | locally optional | Private folder for the original PDFs (local runs only); absolute path. |
+| `INVOICE_S3_ENDPOINT`, `INVOICE_S3_REGION`, `INVOICE_S3_BUCKET`, `INVOICE_S3_ACCESS_KEY_ID`, `INVOICE_S3_SECRET_ACCESS_KEY` | **required in `render`** | Private S3-compatible bucket (Neon Object Storage) for the original PDFs. The `render` profile refuses to start without a working, private bucket - a Render container's disk is wiped on every restart. |
+| `INVOICE_DB_POOL_SIZE` | no (`render` only) | Max database connections, default 3. |
 | `GEMINI_API_KEY` | for extraction | Sent only in the `x-goog-api-key` header; never logged or returned. |
 | `GEMINI_MODEL` | no | Default `gemini-3.5-flash-lite`. |
 | `INVOICE_WORKER_ENABLED` | to process the queue | `true` starts the worker… |
 | `GEMINI_LIMIT_RPM`, `GEMINI_LIMIT_TPM`, `GEMINI_LIMIT_RPD`, `GEMINI_INITIAL_TOKEN_ESTIMATE` | for the worker | …but only when these limits (from Google AI Studio, for your project and model) are set. No defaults on purpose. |
-| `INVOICE_COOKIE_SECURE` | behind TLS | Adds the `Secure` cookie flag (always on in the `render` profile). |
+| `INVOICE_GEMINI_PAID_TIER_CONFIRMED` | for extraction outside the local demo | `true` only after checking that the key's Google Cloud project has active billing. Until then nothing is sent to Gemini. |
+| `INVOICE_CORS_ALLOWED_ORIGINS` | only for a separately hosted frontend | Exact origins, comma-separated; empty = no CORS. |
 | `INVOICE_TEST_DB_PASSWORD` | `-Ppgtest` only | Test database password, or `pgpass.conf`. |
 
-Free-tier Gemini: create the key in Google AI Studio without enabling billing. Free-tier content may be used by
-Google to improve its products – use synthetic invoices only, never real customer documents.
+Gemini and real invoices: on unpaid (free-tier) Gemini API services Google may use the content to improve its products
+and human reviewers may read it (https://ai.google.dev/gemini-api/terms, checked 2026-10-28). Real invoices therefore
+go only to a project with active Cloud Billing, confirmed with `INVOICE_GEMINI_PAID_TIER_CONFIRMED=true`. The local
+demo (synthetic files only) is exempt.
 
 ## 5. Build and test
 
@@ -117,9 +127,9 @@ reviewed SQL scripts in [`docs/sql/`](docs/sql):
 - [`invoice-versioning.sql`](docs/sql/invoice-versioning.sql) – schema reference and read-only checks for versions.
 - [`inspection-queries.sql`](docs/sql/inspection-queries.sql) – read-only diagnostic queries.
 
-There is **no reviewed script yet that creates the complete schema on an empty database** (the base tables were
-originally created by Hibernate in development). A new hosted database therefore needs one first — the procedure is in
-[`docs/RENDER_DEPLOYMENT.md`](docs/RENDER_DEPLOYMENT.md#5-postgresql).
+- [`invoice-process-bootstrap-schema.sql`](docs/sql/invoice-process-bootstrap-schema.sql) – the complete schema for an
+  **empty** database (e.g. the new Neon database), applied once by hand; it refuses a database that already has tables.
+  Procedure: [`docs/RENDER_DEPLOYMENT.md`](docs/RENDER_DEPLOYMENT.md#53-database-and-schema-gate-g2).
 
 `SchemaSafetyGuard` (a `BeanFactoryPostProcessor`, so it runs before the DataSource exists) refuses every start
 except the isolated test run and the local demo unless **both** are set:
@@ -149,14 +159,15 @@ Every URL that is not an API route — including `/` — answers `401`/`403`. Er
 ## 8. Postman
 
 `postman/Invoice-Process.postman_collection.json` with `postman/Invoice-Process-Local.postman_environment.json`.
-Run **"00 - Login"** first after setting `adminEmail` / `adminPassword` in the environment (a test admin only). Its
-first request (`GET /api/health`) obtains the `XSRF-TOKEN` cookie; login rotates that token, and the collection copies
-the current cookie into `xsrfToken` after every response so each write sends the current `X-XSRF-TOKEN`.
+Run **"00 - Login"** first after setting `adminEmail` / `adminPassword` in the environment (a test admin only). Login
+stores the returned `accessToken` in a collection variable for that run, and a collection pre-request script sends it
+as `Authorization: Bearer` on every request (the exported file never contains a token).
 Uploads use the batch API (folders 02, 04, 08 — they **write** a batch, stored PDFs and rejection records; run them
 manually against a demo or test database). No request calls Gemini: extraction happens only if the server's worker is
-enabled. Folder 10 corrects an existing **legacy** invoice (set `legacyInvoiceId`); 10b writes a version. The PDF
-fixture files are **not** included in this repository; use your own synthetic PDFs. The collection was rewritten from
-the source on 2026-10-27 and has **not** been run against a live application yet.
+enabled. Folder 10 corrects an existing **legacy** invoice (set `legacyInvoiceId`); 10b writes a version. Folder 02
+uploads `docs/react-handoff/sample-invoices/synthetic-sample-invoice-01.pdf`; the other fixture files are **not** in
+this repository — use your own synthetic PDFs. The collection was updated from the source on 2026-10-28 and has
+**not** been run against a live application yet.
 
 ## 9. Extraction and validation
 

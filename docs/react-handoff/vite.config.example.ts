@@ -1,8 +1,8 @@
 // vite.config.ts - EXAMPLE for the React app (not part of the backend build).
 //
-// Why a proxy: the API's login cookie is SameSite=Strict and its CSRF token must be READ by JavaScript from the
-// XSRF-TOKEN cookie. Both only work when the browser sees ONE origin. The dev server serves React AND forwards /api/*
-// to the backend, so the browser never makes a cross-origin call. The backend sends no CORS headers on purpose.
+// Why a proxy: the backend sends no CORS headers unless its owner allows an exact origin. The dev server serves React
+// AND forwards /api/* to the backend, so the browser only talks to one origin and no CORS is involved. The
+// Authorization: Bearer header added by the API client is forwarded unchanged.
 //
 // API_PROXY_TARGET has no VITE_ prefix on purpose: it is read here, in Node, and never ends up in the browser bundle.
 import { defineConfig, loadEnv } from 'vite';
@@ -22,8 +22,6 @@ export default defineConfig(({ mode }) => {
           target,
           changeOrigin: true, // the backend sees its own host name
           secure: true,       // verify the backend's TLS certificate
-          // Cookies are host-only (no Domain attribute), so the browser stores them for the dev server's origin;
-          // no cookieDomainRewrite is needed.
         },
       },
     },

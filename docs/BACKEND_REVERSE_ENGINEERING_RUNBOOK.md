@@ -7,7 +7,11 @@ one request, how to debug without guessing, and how to demo it to a senior.
 > vanilla-JS E2E harness and the UI-only tests were archived outside the repository; sections below that describe pages,
 > `login.html`, `session.js` or `cloud-pickers.js` describe that retired UI and are kept for history only. The login cookie
 > is now `INVOICE_PROCESS_AUTH` (JWT issuer `actify-invoice-process`, audience `actify-invoice-process-web`); `GET /`
-> answers 401/403; `GET /api/health` is the public health check. Current API: [REACT_BACKEND_HANDOFF.md](REACT_BACKEND_HANDOFF.md);
+> answers 401/403; `GET /api/health` is the public health check.
+> **2026-10-28 — Bearer tokens.** The login cookie and CSRF were replaced by `Authorization: Bearer <accessToken>`
+> (`JwtBearerAuthenticationFilter`; login returns the token in its JSON body; no cookie, no CSRF, no session). The
+> free-demo profile and its fixture allow-list were removed; uploads also parse the PDF (PDFBox). Passages below that
+> mention the cookie, `XSRF-TOKEN` or `AuthCookies` describe the earlier release. Current API: [REACT_BACKEND_HANDOFF.md](REACT_BACKEND_HANDOFF.md);
 > deployment: [RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md). The storage folder `actify-task8-invoice-documents` keeps
 > its old name on purpose (existing PDFs live there).
 
@@ -45,7 +49,7 @@ ever final without a human.
 | # | Who / what | Status after | Rows written |
 |---|---|---|---|
 | 1 | Vendor starts a batch | – | `upload_batches` (OPEN) |
-| 2 | Vendor uploads a PDF | QUEUED | file `<uuid>.pdf` on disk, `invoice_documents`, `invoices`, `extraction_jobs`, `invoice_workflow_events` |
+| 2 | Vendor uploads a PDF | QUEUED | file `<uuid>.pdf` in private storage (local folder; on Render the private bucket), `invoice_documents`, `invoices`, `extraction_jobs`, `invoice_workflow_events` |
 | 3 | Vendor finishes the batch | QUEUED | `upload_batches.status = CLOSED`, `closed_at` |
 | 4 | Worker claims the job (a few seconds later) | PROCESSING | `gemini_call_attempts` (IN_FLIGHT, before the call), event "Attempt 1" |
 | 5 | Gemini answers, checks run | NEEDS_REVIEW | invoice fields + `invoice_items`, `invoice_versions` V1 (`LLM_EXTRACTION`), `invoice_review_reasons` (if any), attempt → SUCCESS with tokens, job `finished_at` |
@@ -76,7 +80,7 @@ private PDF files, and a small vanilla HTML/CSS/JS frontend served by the same a
 
 | Area | State |
 |---|---|
-| Login (JWT cookie), CSRF, roles VENDOR / REVIEWER / ADMIN, per-object 404 | implemented **[SOURCE][TEST]** |
+| Login (JWT as Bearer token), roles VENDOR / REVIEWER / ADMIN, per-object 404 | implemented **[SOURCE][TEST]** |
 | Vendor batch upload (≤100 PDFs, ≤10 MB each), SHA-256 duplicate check per vendor | implemented **[SOURCE][TEST]** |
 | PostgreSQL job queue + Gemini worker with quota pacing and retries | implemented; **off** by default, **on** in the "Development" configuration — real extractions succeeded for invoices 51 and 52 on 2026-10-23 **[SOURCE][TEST][LIVE]** |
 | Deterministic validator (review reasons) | implemented **[SOURCE][TEST]** |
@@ -95,10 +99,10 @@ aur LLM ka answer kabhi direct 'final' nahi maana jata — hamesha human review 
 
 ```
 Browser (static/*.html + js/*.js)        same origin http://127.0.0.1:8088
-   |  JSON / multipart, cookie INVOICE_PROCESS_AUTH + header X-XSRF-TOKEN
+   |  JSON / multipart, header Authorization: Bearer <accessToken>   (before 2026-10-28: cookie + X-XSRF-TOKEN)
    v
 Spring Security filter chain (security/SecurityConfig)
-   JwtCookieAuthenticationFilter -> role rules -> CSRF check
+   JwtBearerAuthenticationFilter -> role rules
    v
 Controllers (controller/*)  --- thin: parse request, call one service, return DTO
    v
@@ -154,7 +158,7 @@ rules) and it carries `GEMINI_API_KEY`, which the local demo forbids. That is in
 |---|---|---|---|---|
 | Bootstrap | `InvoiceApplication`, `config/SchedulingConfig`, `config/TimeConfig` | start, scheduling, clock | – | – |
 | Start guard | `config/SchemaSafetyGuard` | refuse unsafe DB/profile/schema settings before connecting | `SchemaSafetyGuardTest`, `DefaultProfileBootLoadingTest` | "SchemaSafetyGuard: REFUSING to start – …" (read the reason) |
-| Security | `security/SecurityConfig`, `JwtCookieAuthenticationFilter`, `JwtTokenService`, `AuthCookies`, `LoginService`, `LoginAttemptLimiter`, `CurrentUserService`, `SecurityErrorWriter` | cookie JWT, CSRF, roles, token version, disabled users, login lock | `AuthSecurityWebTest`, `JwtTokenServiceTest`, `*RouteProtectionWebTest`, `AuthPgIntegrationTest` | 403 on POST = missing `X-XSRF-TOKEN`; 401 = cookie expired |
+| Security | `security/SecurityConfig`, `JwtBearerAuthenticationFilter`, `JwtTokenService`, `LoginService`, `LoginAttemptLimiter`, `CurrentUserService`, `SecurityErrorWriter` | Bearer JWT, roles, token version, disabled users, login lock, optional CORS | `AuthSecurityWebTest`, `CorsWebTest`, `JwtTokenServiceTest`, `*RouteProtectionWebTest`, `AuthPgIntegrationTest` | 401 = missing/expired/revoked token; 403 = wrong role |
 | Object access | `security/InvoiceAccessPolicy` | who may read/correct which invoice/PDF → 404/403 | `InvoiceRouteProtectionWebTest`, pgtests | "not found" for an invoice that exists = not yours (by design) |
 | Users | `user/AppUser`, `AppUserService`, `AdminBootstrap`, `UserNames` | accounts, first admin, names (display name, else the e-mail before "@"; admin can rename) | `AppUserServiceTest`, `UserNamesTest` | – |
 | Controllers | `controller/*` (13) | HTTP ↔ DTO | web tests | 415 wrong content type |
@@ -176,12 +180,13 @@ rules) and it carries `GEMINI_API_KEY`, which the local demo forbids. That is in
 
 ## 4. Security filters and roles
 
-1. `JwtCookieAuthenticationFilter` reads cookie `INVOICE_PROCESS_AUTH`, verifies HS256 signature, issuer `actify-invoice-process`,
+1. `JwtBearerAuthenticationFilter` reads only the `Authorization: Bearer` header, verifies HS256 signature, issuer `actify-invoice-process`,
    audience `actify-invoice-process-web`, expiry (30 min). It then loads the user from `app_users` **on every request**: disabled user →
    unauthenticated; token version `tv` ≠ `app_users.token_version` → unauthenticated (that is how "log out everywhere"
    works). The role comes from the database, never from the token.
 2. `SecurityConfig` route rules (default **deny**: `anyRequest().denyAll()`), e.g. `/api/admin/**` → ADMIN.
-3. CSRF: `CookieCsrfTokenRepository.withHttpOnlyFalse()` — cookie `XSRF-TOKEN`, header `X-XSRF-TOKEN`; never disabled.
+3. CSRF: disabled since 2026-10-28 because nothing authenticates automatically (no cookie, stateless). CORS: off
+   unless `INVOICE_CORS_ALLOWED_ORIGINS` lists exact origins.
 4. Object level: `InvoiceAccessPolicy` — someone else's invoice or PDF → **404** (indistinguishable from "missing").
 5. Login: one generic 401 message; `LoginAttemptLimiter` locks after 5 failures for 15 minutes (per client address —
    on the loopback demo that means all logins).
@@ -248,7 +253,7 @@ role change ya disable turant lagu hota hai."
 
 ### 5.5 Login → page
 
-`POST /api/auth/login` → `LoginService#login` (limiter, BCrypt) → `JwtTokenService#issue` → `AuthCookies#setToken`
+`POST /api/auth/login` → `LoginService#login` (limiter, BCrypt) → `JwtTokenService#issueWithExpiry` → token in the JSON body (before 2026-10-28: `AuthCookies#setToken`)
 → the page calls `GET /api/auth/me` and redirects by role (`static/js/session.js#requireRole`). The site root `/`
 (`index.html` + `js/home.js`) only forwards: signed out → `login.html`, otherwise `Task8Session.homeFor(role)`. It holds
 no upload form; the old single-file workspace is `legacy-workspace.html` (ADMIN, unlinked). Redirects are convenience
@@ -361,6 +366,9 @@ Assignment events use from = to = status, so the status-based dashboard queries 
 
 - Folder: `invoice.storage.dir` — development database: `%USERPROFILE%\actify-task8-invoice-documents`; local demo:
   `%USERPROFILE%\invoice-process-localdemo-documents`; override with `INVOICE_STORAGE_DIR`. Never under `static/`. File name = random UUID + `.pdf`; the client's file name is only stored as text.
+- On Render (`render` profile, `invoice.storage.type=s3`) the same bytes go to the private S3-compatible bucket
+  (Neon Object Storage) as `invoice-documents/<uuid>.pdf`, with the SHA-256 as object metadata (`S3DocumentStorage`).
+  Nothing is kept in the container. Setup: `docs/RENDER_DEPLOYMENT.md` section 5.
 - `invoice_documents` keeps id, SHA-256, size, content type, original (sanitized) name.
 - `GET /api/invoices/{id}/document` (and the older `GET /api/documents/{id}`) re-hashes on every read: missing → 404,
   changed bytes → 500 (never served). The reviewer page then re-hashes in the browser and shows the result.
@@ -533,7 +541,7 @@ Database password: `INVOICE_DB_PASSWORD` in the run configuration or `%APPDATA%\
 `INVOICE_DB_URL`, `SPRING_DATASOURCE_URL`, `INVOICE_LIVE_START_APPROVED` or `INVOICE_APPROVED_DATABASE` to "get past"
 the guard.
 
-Postman: see `docs/WORKFLOW_AND_OPERATIONS.md` §6 (run "00 - Login" first; CSRF is copied from the cookie).
+Postman: see `docs/WORKFLOW_AND_OPERATIONS.md` §6 (run "00 - Login" first; the token is sent as a Bearer header).
 
 ---
 
@@ -548,7 +556,7 @@ Postman: see `docs/WORKFLOW_AND_OPERATIONS.md` §6 (run "00 - Login" first; CSRF
 | `Port 8088 already in use` | another instance running | stop it (`Get-NetTCPConnection -LocalPort 8088` shows the PID) |
 | `password authentication failed` | DB password | `INVOICE_DB_PASSWORD` or pgpass.conf |
 | Login 401 although password is right | 5 failures → locked 15 min (429), user disabled, wrong DB | wait / check the user in the admin page |
-| Every POST is 403 | missing `X-XSRF-TOKEN` | do a GET first; send the cookie value as header |
+| Every call after login is 401 | `Authorization: Bearer <token>` missing or misspelt, or token expired (30 min) | send the header; log in again |
 | PDF frame "not found" | invoice not readable by you, or stored file missing | check assignment; check the storage folder |
 | Upload 422 `DUPLICATE_FILE` | you uploaded these exact bytes before | expected — not an error |
 | Invoices stay QUEUED | admin "Queue and Gemini pacing" note / `GET /api/admin/queue/status` → `idleReason` | expected in the demo (no key, worker off). For one controlled extraction see WORKFLOW_AND_OPERATIONS §9.1 |
@@ -592,7 +600,7 @@ Postman: see `docs/WORKFLOW_AND_OPERATIONS.md` §6 (run "00 - Login" first; CSRF
   against the `target/classes` a running JVM uses. Then start once, from one compiler.
 
 **How to diagnose any broken page (in this order):** browser DevTools → Network: the failing request's method, path and
-status. 401 = not logged in / login expired; 403 = wrong role or missing `X-XSRF-TOKEN`; 404 = wrong id **or not
+status. 401 = not logged in / login expired; 403 = wrong role; 404 = wrong id **or not
 yours**; 409 = wrong state / stale version; 422 = the data or file was rejected (body has `code`); 500 = our side → take
 the `errorId` and search the server log. Console: JavaScript errors (a renamed field = DTO mismatch). Startup log:
 `SchemaSafetyGuard` refusal, `Schema-validation`, "Port 8088 already in use".
@@ -671,8 +679,8 @@ Use a PDF this vendor has not uploaded before (otherwise 422 `DUPLICATE_FILE` �
 | Transaction | a group of DB changes that all commit or all roll back |
 | FK | foreign key: a column that must point to an existing row |
 | Unique constraint | the DB refuses a second row with the same value |
-| CSRF | another site tricking the browser into a write; blocked by the `X-XSRF-TOKEN` header |
-| JWT cookie | signed login token in an HttpOnly cookie JavaScript cannot read |
+| CSRF | another site tricking the browser into a write with credentials the browser adds itself (cookies); not possible with header-only Bearer tokens |
+| JWT / Bearer token | signed login token returned by login and sent as `Authorization: Bearer`; the React app keeps it in memory |
 | Queue claim | a worker locks one job row so nobody else takes it (`SKIP LOCKED`) |
 | Idempotency | doing it twice has the same effect as once (re-upload → duplicate, no second invoice) |
 | Hash (SHA-256) | fingerprint of the file bytes; one changed byte = a different hash |

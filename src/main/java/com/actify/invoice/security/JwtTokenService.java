@@ -32,7 +32,8 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Creates and checks the login token (a JWT). We are both the issuer and the only consumer, so a shared
+ * Creates and checks the login token (a JWT), which clients send as "Authorization: Bearer <token>".
+ * We are both the issuer and the only consumer, so a shared
  * secret (HMAC-SHA256, "HS256") is enough. All cryptography is done by Spring Security + Nimbus,
  * never by hand. JwtCompatibilitySpikeTest proves these library classes behave as expected.
  *
@@ -116,6 +117,31 @@ public class JwtTokenService {
      */
     public String issue(AppUser user) {
         return issue(user, Instant.now());
+    }
+
+    /** Like issue(), plus the expiry the login response reports (the same instant as the token's "exp"). */
+    public IssuedToken issueWithExpiry(AppUser user) {
+        Instant issuedAt = Instant.now();
+        return new IssuedToken(issue(user, issuedAt), issuedAt.plus(lifetime));
+    }
+
+    /** A freshly signed token and when it expires. */
+    public static final class IssuedToken {
+        private final String value;
+        private final Instant expiresAt;
+
+        IssuedToken(String value, Instant expiresAt) {
+            this.value = value;
+            this.expiresAt = expiresAt;
+        }
+
+        public String getValue() { return value; }
+        public Instant getExpiresAt() { return expiresAt; }
+
+        @Override
+        public String toString() {
+            return "IssuedToken{value hidden, expiresAt=" + expiresAt + "}";
+        }
     }
 
     // Package-private so tests can create an already-expired token.

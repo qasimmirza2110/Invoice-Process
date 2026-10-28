@@ -15,7 +15,7 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
-import javax.servlet.http.Cookie;
+import org.springframework.test.web.servlet.request.RequestPostProcessor;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -28,7 +28,6 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -49,14 +48,14 @@ class AdminIntakeRouteProtectionWebTest {
 
     @Test
     void onlyAdminsSeeTheIntakeBoardOrAssign() throws Exception {
-        Cookie vendor = TestLogins.cookieFor(TestLogins.user(2, Role.VENDOR), users, tokenService);
-        Cookie reviewer = TestLogins.cookieFor(TestLogins.user(3, Role.REVIEWER), users, tokenService);
+        RequestPostProcessor vendor = TestLogins.bearerFor(TestLogins.user(2, Role.VENDOR), users, tokenService);
+        RequestPostProcessor reviewer = TestLogins.bearerFor(TestLogins.user(3, Role.REVIEWER), users, tokenService);
         String body = "{\"invoiceIds\":[41],\"reviewerId\":7}";
 
         mvc.perform(get("/api/admin/intake")).andExpect(status().isUnauthorized());
-        for (Cookie cookie : new Cookie[]{vendor, reviewer}) {
-            mvc.perform(get("/api/admin/intake").cookie(cookie)).andExpect(status().isForbidden());
-            mvc.perform(post("/api/admin/assignments").cookie(cookie).with(csrf())
+        for (RequestPostProcessor cookie : new RequestPostProcessor[]{vendor, reviewer}) {
+            mvc.perform(get("/api/admin/intake").with(cookie)).andExpect(status().isForbidden());
+            mvc.perform(post("/api/admin/assignments").with(cookie)
                     .contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isForbidden());
         }
         verifyNoInteractions(assignments, intakeBoard);
@@ -64,13 +63,13 @@ class AdminIntakeRouteProtectionWebTest {
 
     @Test
     void anEmptyBoardIsAValidAnswerNotAnError() throws Exception {
-        Cookie admin = TestLogins.cookieFor(TestLogins.user(1, Role.ADMIN), users, tokenService);
+        RequestPostProcessor admin = TestLogins.bearerFor(TestLogins.user(1, Role.ADMIN), users, tokenService);
         Map<String, Object> empty = new LinkedHashMap<>();
         empty.put("needsAssignment", Collections.emptyList());
         empty.put("assigned", Collections.emptyList());
         when(intakeBoard.board()).thenReturn(empty);
 
-        mvc.perform(get("/api/admin/intake").cookie(admin))
+        mvc.perform(get("/api/admin/intake").with(admin))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.needsAssignment").isEmpty())
                 .andExpect(jsonPath("$.assigned").isEmpty());
@@ -80,10 +79,10 @@ class AdminIntakeRouteProtectionWebTest {
     // The admin gets a generic message plus a reference to the log line, never the class name or a stack trace.
     @Test
     void aBrokenBoardIsA500WithAReferenceAndNoInternals() throws Exception {
-        Cookie admin = TestLogins.cookieFor(TestLogins.user(1, Role.ADMIN), users, tokenService);
+        RequestPostProcessor admin = TestLogins.bearerFor(TestLogins.user(1, Role.ADMIN), users, tokenService);
         when(intakeBoard.board()).thenThrow(new NoClassDefFoundError("com/actify/invoice/review/IntakeBoardService$1"));
 
-        mvc.perform(get("/api/admin/intake").cookie(admin))
+        mvc.perform(get("/api/admin/intake").with(admin))
                 .andExpect(status().isInternalServerError())
                 .andExpect(jsonPath("$.message").value("An unexpected error occurred."))
                 .andExpect(jsonPath("$.errorId").value(matchesPattern("[0-9a-f]{8}")))
@@ -93,13 +92,13 @@ class AdminIntakeRouteProtectionWebTest {
 
     @Test
     void assignDefaultsToNoReassignAndReturnsCanonicalValues() throws Exception {
-        Cookie admin = TestLogins.cookieFor(TestLogins.user(1, Role.ADMIN), users, tokenService);
+        RequestPostProcessor admin = TestLogins.bearerFor(TestLogins.user(1, Role.ADMIN), users, tokenService);
         when(assignments.assign(any(), eq(7L), eq(false))).thenReturn(Collections.singletonList(
                 new AssignmentResult(41L, true, "Assigned.", InvoiceStatus.QUEUED, 7L, "alex")));
 
-        mvc.perform(post("/api/admin/assignments").cookie(admin).contentType(MediaType.APPLICATION_JSON)
-                .content("{\"invoiceIds\":[41],\"reviewerId\":7}")).andExpect(status().isForbidden()); // no CSRF
-        mvc.perform(post("/api/admin/assignments").cookie(admin).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+        mvc.perform(post("/api/admin/assignments").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"invoiceIds\":[41],\"reviewerId\":7}")).andExpect(status().isUnauthorized()); // no token
+        mvc.perform(post("/api/admin/assignments").with(admin).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"invoiceIds\":[41],\"reviewerId\":7}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].assigned").value(true))
@@ -107,7 +106,7 @@ class AdminIntakeRouteProtectionWebTest {
                 .andExpect(jsonPath("$[0].reviewerName").value("alex"));
         verify(assignments).assign(any(), eq(7L), eq(false));
 
-        mvc.perform(post("/api/admin/assignments").cookie(admin).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+        mvc.perform(post("/api/admin/assignments").with(admin).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"invoiceIds\":[41],\"reviewerId\":8,\"reassign\":true}")).andExpect(status().isOk());
         verify(assignments).assign(any(), eq(8L), eq(true));
     }

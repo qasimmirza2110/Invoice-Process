@@ -16,7 +16,7 @@ import java.util.Map;
  * version, user, invoice, database or secret information. A database outage therefore shows up as failing API calls
  * and in the server log, not here - restarting the container would not fix a database outage anyway.
  *
- * Public in SecurityConfig.PUBLIC_REQUESTS (GET only); the login cookie is ignored on it.
+ * Public in SecurityConfig.PUBLIC_REQUESTS (GET only); an Authorization header is ignored on it.
  */
 @RestController
 public class HealthController {

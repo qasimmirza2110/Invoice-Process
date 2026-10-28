@@ -1,14 +1,11 @@
 package com.actify.invoice.user;
 
-import com.actify.invoice.config.RenderFreeDemoGuard;
 import com.actify.invoice.dto.FieldErrorDto;
 import com.actify.invoice.exception.InvalidRequestException;
 import com.actify.invoice.exception.UserConflictException;
 import com.actify.invoice.exception.UserNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.core.env.Environment;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -43,22 +40,10 @@ public class AppUserService {
 
     private final AppUserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
-    // Free demo only (RenderFreeDemoGuard): every account must use a reserved, never-deliverable @example.test address.
-    private final boolean syntheticAccountsOnly;
-
-    @Autowired
-    public AppUserService(AppUserRepository userRepository, PasswordEncoder passwordEncoder, Environment environment) {
-        this(userRepository, passwordEncoder, RenderFreeDemoGuard.isActive(environment));
-    }
 
     public AppUserService(AppUserRepository userRepository, PasswordEncoder passwordEncoder) {
-        this(userRepository, passwordEncoder, false);
-    }
-
-    AppUserService(AppUserRepository userRepository, PasswordEncoder passwordEncoder, boolean syntheticAccountsOnly) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
-        this.syntheticAccountsOnly = syntheticAccountsOnly;
     }
 
     /** Lower-case + trim, with a fixed locale so e.g. a Turkish default locale cannot change "I". */
@@ -77,9 +62,6 @@ public class AppUserService {
         List<FieldErrorDto> errors = new ArrayList<>();
         if (normalizedEmail.isEmpty() || normalizedEmail.length() > MAX_EMAIL_LENGTH || !EMAIL.matcher(normalizedEmail).matches()) {
             errors.add(new FieldErrorDto("email", "email must be a valid email address"));
-        } else if (syntheticAccountsOnly && !RenderFreeDemoGuard.isSyntheticEmail(normalizedEmail)) {
-            errors.add(new FieldErrorDto("email", "this temporary demo accepts only synthetic "
-                    + RenderFreeDemoGuard.SYNTHETIC_EMAIL_SUFFIX + " addresses"));
         }
         // Optional: when left blank it defaults to the e-mail before the "@" - the name the UI shows anyway.
         String name = displayName == null ? "" : displayName.trim();

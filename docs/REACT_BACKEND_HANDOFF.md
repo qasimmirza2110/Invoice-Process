@@ -1,8 +1,21 @@
 # Actify Invoice Process — React ↔ backend handoff
 
-Status: written 2026-10-27 from the source (`controller/*`, `dto/*`, `security/*`, `exception/GlobalExceptionHandler`,
-the services they call) and the tests named below. Every route and field here exists in the code. Examples use
-synthetic ids and values only. If this file and the code disagree, **the code wins** — please report the difference.
+Status: updated 2026-10-28 from the source (`controller/*`, `dto/*`, `security/*`, `exception/GlobalExceptionHandler`,
+the services they call) and the tests named below, for the **Bearer-token** release (branch
+`feature/bearer-jwt-real-uploads`). Every route and field here exists in that code. Examples use synthetic ids and values
+only. If this file and the code disagree, **the code wins** — please report the difference.
+
+> **Deployed or not?** The API URL stays **`https://invoice-process.onrender.com`** — this release replaces the code
+> behind that same service. But on 2026-10-28 that URL still ran the **older cookie + CSRF build** (free-demo profile).
+>
+> | | Live today (old build) | This document (target, after the owner deploys it) |
+> |---|---|---|
+> | Login answer | `Set-Cookie: INVOICE_PROCESS_AUTH`, no token in the body | JSON with `accessToken`, no cookie |
+> | Every other call | cookie + `X-XSRF-TOKEN` header | `Authorization: Bearer <accessToken>` |
+> | Uploads | only six fixture PDFs, `@example.test` accounts | any valid PDF ≤ 10 MB |
+> | Stored PDFs | lost on every restart | kept in a private bucket (Neon Object Storage) |
+>
+> Build against the target. Check section 1.4 before you test against the live URL.
 
 Machine-readable companion: [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0, same routes and schemas).
 
@@ -11,8 +24,14 @@ Machine-readable companion: [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0, same ro
 ## 0. What the backend is (and is not)
 
 - **API-only Java backend** (Spring Boot 2.7, Java 8 source level, PostgreSQL). It serves **no HTML, CSS or JavaScript**.
-  `GET /` and every other unlisted URL answer **401** (no login) or **403** (logged in). The old vanilla-JS pages were
+  `GET /` and every other unlisted URL answer **401** (no token) or **403** (valid token). **That 401 on `/` is expected,
+  not an outage** — the health check is `GET /api/health` → `200 {"status":"UP"}`. The old vanilla-JS pages were
   archived outside the repository; nothing in the backend depends on them.
+- **It runs on free plans** (Render Free for the API, Neon Free for the database and the PDF bucket). Consequences for
+  the UI: the first call after 15 idle minutes can take **about a minute** (show a patient loading state, do not retry
+  in a loop); the database itself may also need a moment to wake; and if the monthly free quota runs out, calls that
+  need the database fail with 500 until the next month. It is a **demo environment**: no uptime promise, and only
+  synthetic or explicitly approved test PDFs — never a real client invoice.
 - The React app is a **separate project**. It must not reimplement any business rule as the *only* check — the
   backend enforces all of them (section 8). React decides what to *show*; the backend decides what is *allowed*.
 - Roles: `VENDOR` (uploads), `REVIEWER` (corrects and submits assigned invoices), `ADMIN` (users, categories,
@@ -21,7 +40,7 @@ Machine-readable companion: [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0, same ro
 | Item | Value |
 |---|---|
 | Base URL, local | `http://127.0.0.1:8088` (local demo, bound to loopback only) |
-| Base URL, Render | `https://<service>.onrender.com` (see [RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md)) |
+| Base URL, Render | `https://invoice-process.onrender.com` — the same URL before and after this release (see the table at the top for which contract it currently serves) |
 | Format | JSON, except file upload (`multipart/form-data`) and the PDF stream (`application/pdf`) |
 | Dates | `LocalDate` → `"2026-10-06"`; `LocalDateTime` → `"2026-10-16T11:00:00"` (no zone; stored as UTC wall-clock) |
 | Money / quantities | JSON numbers from Java `BigDecimal` (e.g. `12390.00`). Never do money math with JS floats: keep the string form or use a decimal library; send amounts as **strings** in request bodies |
@@ -29,82 +48,123 @@ Machine-readable companion: [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0, same ro
 
 ---
 
-## 1. Session, cookies, CSRF, CORS
+## 1. Login, Bearer token, CORS
 
-### 1.1 Authentication cookie
+### 1.1 The access token
+
+`POST /api/auth/login` with `{"email": "...", "password": "..."}` returns (200):
+
+```json
+{ "accessToken": "eyJhbGciOiJIUzI1NiJ9.eyJ…", "tokenType": "Bearer", "expiresIn": 1800,
+  "expiresAt": "2026-10-28T10:30:00Z",
+  "user": { "id": 7, "email": "reviewer7@example.test", "name": "Reviewer Seven", "displayName": "Reviewer Seven", "role": "REVIEWER" } }
+```
+
+Send the token on **every other call** as a header:
+
+```
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJ…
+```
 
 | Property | Value | Source |
 |---|---|---|
-| Name | **`INVOICE_PROCESS_AUTH`** | `AuthCookies.AUTH_COOKIE` |
+| Where it is read | **only** the `Authorization: Bearer …` header. Never a cookie, URL/query parameter or request body (tested) | `JwtBearerAuthenticationFilter` |
 | Content | HS256-signed JWT: `iss` = `actify-invoice-process`, `aud` = `actify-invoice-process-web`, `sub` = user id, `tv` = token version, `iat`, `exp`, `jti` | `JwtTokenService` |
-| Attributes | `HttpOnly; SameSite=Strict; Path=/; Max-Age=1800` (30 min); `Secure` on HTTPS requests and always when `INVOICE_COOKIE_SECURE=true` (always in the `render` profile) | `AuthCookies` |
-| Refresh | none — after 30 minutes the next call returns **401**; send the user to login | |
-| Role | **not** in the token: read from the database on every request, so role changes / disabling take effect on the next request | `JwtCookieAuthenticationFilter` |
+| Lifetime | 30 minutes (`invoice.jwt.ttl-minutes`), reported as `expiresIn` (seconds) and `expiresAt` (UTC) | |
+| Refresh | none — after expiry the next call returns **401**; send the user to login | |
+| Role | **not** in the token: read from the database on every request, so a role change or disabling takes effect on the next request | `JwtBearerAuthenticationFilter` |
+| Cookies / session | none. Login sets **no cookie**; the server keeps no session | `ApiOnlySurfaceWebTest` |
 
-JavaScript can never read this cookie, and the token never appears in a response body. The browser attaches it
-automatically on same-origin requests (`fetch` default `credentials: 'same-origin'`).
+Rejected with **401** `{"message":"Please log in."}` and header `WWW-Authenticate: Bearer` (the response never says
+which check failed): missing token, bad signature, other key, `alg=none`, HS512, expired, wrong issuer/audience,
+malformed header, unknown/disabled user, token version changed. Tests: `AuthSecurityWebTest`, `JwtTokenServiceTest`,
+`JwtCompatibilitySpikeTest`.
 
-Rejected (→ **401** + `Set-Cookie: INVOICE_PROCESS_AUTH=; Max-Age=0`): bad signature, other key, `alg=none`, HS512,
-expired, wrong issuer/audience, unknown/disabled user, token version changed. Tests: `AuthSecurityWebTest`
-(`badCookiesAreRejectedWith401AndDeleted`, `disabledUserAndRevokedTokenVersionAreRejectedOnTheNextRequest`,
-`legacyTask8CookieAndLegacyIssuerOrAudienceAreNoLongerAccepted`), `JwtTokenServiceTest`, `JwtCompatibilitySpikeTest`.
+**Keep the token in memory** (a React context / module variable) — **not** in `localStorage`/`sessionStorage`, where any
+injected script could read it. Consequence: a full page reload logs the user out; that is intended. Never put the token
+in a URL, never log it, never put any secret in a `VITE_*` variable (everything in `VITE_*` is public).
 
-**Migration note (2026-10-27):** the earlier cookie `TASK8_AUTH` and tokens with issuer `task8-invoice` / audience
-`task8-web` are no longer accepted. Every user logs in once more after this release. An old `TASK8_AUTH` cookie is
-simply ignored and expires in the browser by itself (max. 30 minutes after it was issued).
+**Logout.** There is no server-side "log out this token" call: the frontend simply forgets its in-memory token.
+`POST /api/auth/logout-all` is the real server-side revocation — it raises the user's token version, so **every**
+token issued to that user so far (all tabs and devices) stops working on its next request.
 
-### 1.2 CSRF (every POST / PUT / DELETE, including login)
-
-- Spring Security keeps a readable cookie **`XSRF-TOKEN`** (not HttpOnly, `Path=/`). It is set on the first response
-  to a client that has none — **including anonymous calls** such as `GET /api/health` or a `401` from
-  `GET /api/auth/me` (test: `ApiOnlySurfaceWebTest.anAnonymousApiCallHandsOutTheReadableCsrfCookie`).
-- Every unsafe request must send header **`X-XSRF-TOKEN: <current value of the XSRF-TOKEN cookie>`**.
-- Missing / wrong header → **403** `"Missing or invalid CSRF token. Reload the page and try again."` This check runs
-  **before** authentication, so an anonymous POST without the header is also 403, not 401.
-- The token is **replaced at login and at logout** (both responses carry a new `XSRF-TOKEN`) and otherwise stays
-  stable (tests: `AuthSecurityWebTest.loginAndLogoutIssueAFreshCsrfToken`, `CsrfTokenStabilityWebTest`).
-  → Always read the cookie **at the moment you send** a request; never cache it in React state across login/logout.
-- CSRF is never disabled. Do not ask for that.
+**Why there is no CSRF token any more.** CSRF attacks need a credential the browser attaches *by itself* (a cookie).
+Browsers never add an `Authorization` header on their own, so a forged cross-site request arrives without a token and
+gets 401. The backend therefore switched CSRF off together with the cookie (`SecurityConfig`, tested: a write without a
+token is 401, a write with a valid token needs no other header).
 
 ```js
-// api.js - the single fetch wrapper every component should use
-function xsrf() {
-  const m = document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/);
-  return m ? decodeURIComponent(m[1]) : '';
-}
+// api.js - the single fetch wrapper every component uses
+let accessToken = null;                       // memory only
+export const setToken = (t) => { accessToken = t; };
+export const clearToken = () => { accessToken = null; };
+
 export async function api(path, { method = 'GET', json, form, signal } = {}) {
   const headers = { Accept: 'application/json' };
-  if (method !== 'GET') headers['X-XSRF-TOKEN'] = xsrf();
+  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
   if (json !== undefined) headers['Content-Type'] = 'application/json';
-  const res = await fetch(path, { method, headers, signal, credentials: 'same-origin',
+  // For FormData do NOT set Content-Type: the browser adds it with the multipart boundary.
+  const res = await fetch(path, { method, headers, signal,
     body: json !== undefined ? JSON.stringify(json) : form });
-  if (res.status === 401 && path !== '/api/auth/login') onSessionExpired();   // go to the login view
+  if (res.status === 401 && accessToken) { clearToken(); onSessionEnded(); }
   return res;
 }
 ```
 
-### 1.3 Origin model, CORS and cookies — read before choosing hosting
+Using it — login, a Bearer GET, a JSON write and a multipart upload (fake values):
+```js
+// 1. Login (public). The token comes back in the JSON body; no cookie is set.
+const login = await api('/api/auth/login', { method: 'POST', json: { email: 'vendor.test@example.test', password } });
+if (!login.ok) { /* 401 generic message, 429 locked */ }
+const { accessToken, user } = await login.json();
+setToken(accessToken);                         // route by user.role
 
-The backend sends **no CORS headers** and has no CORS configuration (fail-closed). Two reasons:
+// 2. Bearer GET
+const me = await (await api('/api/auth/me')).json();
 
-1. The auth cookie is `SameSite=Strict`: a browser does not send it on requests from another *site*.
-   Note that `*.onrender.com` is on the Public Suffix List, so `frontend.onrender.com` and `api.onrender.com` are
-   **different sites** — the cookie would not be sent.
-2. The CSRF pattern needs JavaScript to **read** the `XSRF-TOKEN` cookie. A page on another origin cannot read a cookie
-   of the API's domain, so it could never build the header.
+// 3. JSON write (VENDOR): create a batch -> 201 BatchSummary { id, status: "OPEN", ... }
+const batch = await (await api('/api/batches', { method: 'POST', json: { label: 'October uploads' } })).json();
 
-**Supported setup: one origin.** The browser must load React and call `/api/**` on the same scheme + host + port.
+// 4. Multipart upload: FormData, NO Content-Type header -> 202 (accepted, QUEUED) or 422 (rejected, see `code`)
+const form = new FormData();
+form.append('file', fileInput.files[0]);       // any valid PDF <= 10 MB
+const up = await api(`/api/batches/${batch.id}/files`, { method: 'POST', form });
+const result = await up.json();                // { accepted, code, message, status, invoiceId, fileName }
+```
+
+### 1.2 Origin model and CORS
+
+**Recommended: one origin.** The browser loads React and calls `/api/**` on the same scheme + host + port; no CORS is
+involved.
 
 | Environment | How |
 |---|---|
-| Local development | Vite/CRA dev server with a proxy: `/api` → `http://127.0.0.1:8088` (e.g. Vite `server.proxy = { '/api': 'http://127.0.0.1:8088' }`). The browser only ever talks to the dev server's origin. |
-| Deployed | Put React and the API behind **one public hostname**: a reverse proxy / CDN rule that serves the React build and forwards `/api/*` to the backend (e.g. a custom domain with path-based routing, or a Render static site whose rewrite rule forwards `/api/*` to the backend service — verify that Render rewrite supports proxying to an external URL with cookies before relying on it). |
+| Local development | Vite dev server with a proxy: `/api` → the backend (`react-handoff/vite.config.example.ts`). The browser only talks to the dev server. |
+| Deployed, same origin | One public hostname: a reverse proxy / CDN rule serves the React build and forwards `/api/*` to the backend. |
+| Deployed, separate origin | Allowed with Bearer tokens: the owner sets `INVOICE_CORS_ALLOWED_ORIGINS=https://<exact frontend origin>` on the backend. |
 
-**Not supported without a backend change (do not do these):** `Access-Control-Allow-Origin: *`, switching the cookie
-to `SameSite=None`, disabling CSRF, allowing all origins. If the product later *requires* a separate API origin, that
-is a deliberate backend change: an explicit allow-list of the one frontend origin with credentials, `SameSite=None;
-Secure` cookies, and a CSRF token delivered in a response body (because the cookie becomes unreadable). That change
-needs its own security review and tests. Until the frontend origin is decided, production stays same-origin only.
+CORS is **closed by default** (no `Access-Control-*` headers → browsers refuse cross-origin calls). When
+`INVOICE_CORS_ALLOWED_ORIGINS` is set, only those exact origins (comma-separated, `scheme://host[:port]`, no `*`, no
+path) get CORS headers: methods `GET, POST, PUT`, request headers `Authorization, Content-Type`, exposed header
+`Content-Disposition`, **no credentials** (nothing to send — there are no cookies). An invalid entry stops the backend
+from starting. Tests: `CorsWebTest`. React then calls the absolute API URL (e.g. `VITE_API_BASE_URL`, a public value).
+
+### 1.3 Migration from the cookie release
+
+| Before (≤ 2026-10-27) | Now |
+|---|---|
+| login set cookie `INVOICE_PROCESS_AUTH` | login returns `accessToken` in the body; no cookie |
+| every POST/PUT needed `X-XSRF-TOKEN` | no CSRF header; `Authorization: Bearer` on every call |
+| `POST /api/auth/logout` | removed (forget the token; `POST /api/auth/logout-all` revokes server-side) |
+| login response = the user object | login response = `{accessToken, tokenType, expiresIn, expiresAt, user}` — `user` has the old shape |
+| anonymous write without CSRF header → 403 | anonymous write → 401 |
+| no CORS at all | CORS off by default, exact-origin allow-list possible |
+
+### 1.4 Which build am I talking to?
+
+`POST /api/auth/login` with valid credentials: a body containing `"accessToken"` = this release. A body without it and a
+`Set-Cookie: INVOICE_PROCESS_AUTH` header (or a 403 "Missing or invalid CSRF token" when no CSRF header was sent) = the
+older cookie build — ask the backend owner to deploy this release first.
 
 ---
 
@@ -124,16 +184,16 @@ Every 4xx/5xx from the API (from controllers **and** from the security filters) 
 
 | Status | Meaning in this API | Typical cause | UI reaction |
 |---|---|---|---|
-| 400 | Malformed or invalid request | bad JSON, missing part/parameter, field validation (`fieldErrors`), file too large / not a PDF on the legacy endpoint | show `message` / field errors; do not retry unchanged |
-| 401 | Not authenticated | no cookie, expired/revoked/invalid token, disabled user; **login**: wrong e-mail/password (one generic message) | go to login (on the login form show the message) |
-| 403 | Authenticated but not allowed, **or CSRF failure** | wrong role for the URL, wrong dashboard, admin editing a workflow invoice, missing `X-XSRF-TOKEN` | if `message` mentions CSRF: re-read the cookie (a GET refreshes it) and let the user retry once; otherwise "not allowed" |
+| 400 | Malformed or invalid request | bad JSON, missing part/parameter, field validation (`fieldErrors`), file too large / not a PDF on the legacy endpoint, a whole upload request over 11 MB | show `message` / field errors; do not retry unchanged |
+| 401 | Not authenticated | no/malformed `Authorization: Bearer` header, expired/revoked/invalid token, disabled user; **login**: wrong e-mail/password (one generic message) | forget the token, go to login (on the login form show the message) |
+| 403 | Valid token, but not allowed | wrong role for the URL, wrong dashboard, admin editing a workflow invoice | "not allowed" — do not retry |
 | 404 | Not found **or not yours** (same answer on purpose) | other vendor's batch/invoice/PDF, reviewer not assigned, unknown id | "not found" |
 | 409 | Business-rule / state conflict | stale `baseVersion`/`version`, wrong status for the action, closed/full batch, duplicate e-mail, legacy extract switched off | reload the object, show `message`; never resend the same body blindly |
 | 415 | Wrong `Content-Type` | developer error | fix the request |
 | 422 | Rule rejected the content | batch file rejected (`FileIntakeResponse.code`), submit while current data fails a check or duplicates an earlier invoice of the same vendor, legacy extraction result failed validation | show `code`/`message`/`fieldErrors`; do not retry unchanged |
 | 429 | Temporarily refused | login locked (5 failures → 15 min); Gemini quota (legacy extract only) | show message; retry later |
 | 502 | Provider failure | Gemini call failed (legacy `POST /api/invoices/extract` only) | show message; retry later |
-| 500 | Unexpected server error | includes database failures and a stored PDF failing its SHA-256 check | "something went wrong (reference …)" |
+| 500 | Server or storage error | database unavailable (e.g. free quota used up), a stored PDF failing its SHA-256 check, or the PDF bucket unreachable during an upload (`message`: "Could not store the original PDF" — the file was **not** accepted, nothing was queued) | "something went wrong (reference …)"; an upload may be retried later — a duplicate is never created |
 
 Duplicate invoices: a re-uploaded **identical file** of the same vendor is refused at intake (422 `DUPLICATE_FILE`); the
 **same invoice number** from the same vendor in a different PDF is flagged after extraction as a review reason and blocks
@@ -144,20 +204,27 @@ produce an HTTP error: they appear as invoice status `QUEUED` (waiting / retry s
 
 ---
 
-## 3. Endpoint reference (47 routes)
+## 3. Endpoint reference (46 routes)
 
-Legend — **Auth**: `public` / `login` / role list (checked by `SecurityConfig`: 401 without login, 403 wrong role).
-**Scope**: per-object rule (`InvoiceAccessPolicy`, services) — failing it gives **404**. **CSRF**: header required.
-"Tests" lists the test classes that exercise the route over HTTP.
+Legend — **Auth**: `public` / `login` / role list (checked by `SecurityConfig`: 401 without a valid Bearer token, 403
+wrong role). Every route except `GET /api/health` and `POST /api/auth/login` needs `Authorization: Bearer <token>`.
+**Scope**: per-object rule (`InvoiceAccessPolicy`, services) — failing it gives **404**. **Writes**: the call changes
+data (disable the button while it is pending). "Tests" lists the test classes that exercise the route over HTTP.
+Numbers are kept from the previous edition; #3 (`POST /api/auth/logout`) was removed.
+
+**Verification status (2026-10-28), the same for every route below:** verified against the **local code and its
+automated tests** (`./mvnw -o clean package`, 331 tests green). **Not verified live**: the new build is not deployed
+yet, so none of these routes has been exercised against `https://invoice-process.onrender.com` with Bearer tokens or
+the Neon database/bucket. That URL currently serves the older cookie contract (top of this document). This section
+becomes "verified live" only after the post-deploy checks in `RENDER_DEPLOYMENT.md` section 9 pass.
 
 ### 3.1 Health and session
 
-| # | Method & path | Handler | Auth | CSRF | Request | Success | Errors | Tests |
+| # | Method & path | Handler | Auth | Writes | Request | Success | Errors | Tests |
 |---|---|---|---|---|---|---|---|---|
 | 1 | `GET /api/health` | `HealthController.health` | public | – | – | 200 `{"status":"UP"}`, `Cache-Control: no-store` | – | `ApiOnlySurfaceWebTest` |
-| 2 | `POST /api/auth/login` | `AuthController.login` | public | yes | `LoginRequest {email, password}` | 200 `Me` + `Set-Cookie INVOICE_PROCESS_AUTH` + new `XSRF-TOKEN` | 401 generic (wrong/unknown/disabled, password > 72 bytes), 429 locked, 403 CSRF, 415 | `AuthSecurityWebTest`, `AuthPgIntegrationTest` |
-| 3 | `POST /api/auth/logout` | `AuthController.logout` | public (works with an expired session) | yes | – | 204, auth cookie deleted, new `XSRF-TOKEN` | 403 CSRF | `AuthSecurityWebTest` |
-| 4 | `POST /api/auth/logout-all` | `AuthController.logoutEverywhere` | login | yes | – | 204; token version +1 → **every** token of this user stops working | 401, 403 CSRF | `AuthSecurityWebTest` |
+| 2 | `POST /api/auth/login` | `AuthController.login` | public (an `Authorization` header is ignored) | – | `LoginRequest {email, password}` | 200 `LoginResponse {accessToken, tokenType:"Bearer", expiresIn, expiresAt, user: Me}`, `Cache-Control: no-store`, **no cookie** | 401 generic (wrong/unknown/disabled, password > 72 bytes), 429 locked, 415 | `AuthSecurityWebTest`, `AuthPgIntegrationTest` |
+| 4 | `POST /api/auth/logout-all` | `AuthController.logoutEverywhere` | login | yes | – | 204; token version +1 → **every** token of this user stops working | 401 | `AuthSecurityWebTest` |
 | 5 | `GET /api/auth/me` | `AuthController.me` | login | – | – | 200 `Me` | 401 | `AuthSecurityWebTest`, `AuthPgIntegrationTest` |
 
 Side effects: login records failures in an in-memory limiter (5 failures per e-mail **or** per client address → 15-min
@@ -165,7 +232,7 @@ lock; resets on restart); logout-all writes `app_users.token_version`.
 
 ### 3.2 Vendor batches and cloud sources (VENDOR, ADMIN)
 
-| # | Method & path | Handler | Scope | CSRF | Request | Success | Errors | Tests |
+| # | Method & path | Handler | Scope | Writes | Request | Success | Errors | Tests |
 |---|---|---|---|---|---|---|---|---|
 | 6 | `POST /api/batches` | `BatchController.create` | creator owns it | yes | `CreateBatchRequest {label?, defaultCategoryCode?, source?}` — `source` ∈ `LOCAL` (default) / `GOOGLE_DRIVE` / `ONEDRIVE`; label ≤ 255 | 201 `BatchSummary` | 400 unknown source / cloud source not configured / unknown category | `BatchQueuePgIntegrationTest`, `BatchRouteProtectionWebTest` |
 | 7 | `GET /api/batches` | `BatchController.list` | vendor: own; admin: all | – | – | 200 `BatchSummary[]` newest first | – | same |
@@ -174,21 +241,25 @@ lock; resets on restart); logout-all writes `app_users.token_version`.
 | 10 | `POST /api/batches/{id}/close` | `BatchController.close` | owner or admin | yes | – | 200 `BatchSummary` (`CLOSED`) | 404, 409 | `BatchQueuePgIntegrationTest` |
 | 11 | `GET /api/cloud-sources` | `CloudSourceController.list` | – | – | – | 200 one entry per provider (below) | – | `BatchRouteProtectionWebTest`, `CloudSourceSettingsTest` |
 
-File rules (server-side, identical for every source): non-empty, ≤ 10 MB (`multipart` max request 11 MB), name ends
-with `.pdf`, content type `application/pdf` / `application/x-pdf` / `application/octet-stream`, bytes start with
-`%PDF-`. Rejection codes (422): `INVALID_FILE`, `DUPLICATE_FILE` (same SHA-256 already uploaded **by this vendor**, any
-batch — another vendor's identical file is neither blocked nor revealed), `NESTED_FOLDER` (file in a sub-folder of a
-folder upload), `SOURCE_MISMATCH` (declared `source` ≠ batch source). Max **100 accepted files per batch**.
+**Any real invoice PDF is accepted** when it passes these server-side rules (identical for every source, no list of
+allowed files, no e-mail-domain rule): non-empty, ≤ 10 MB (a whole request over 11 MB is refused with **400** before it
+reaches the rules), name ends with `.pdf`, content type `application/pdf` / `application/x-pdf` /
+`application/octet-stream`, bytes start with `%PDF-`, **and the file really opens as a PDF with at least one page**
+(Apache PDFBox; damaged/truncated files and password-protected PDFs are refused). These checks are not a virus scan.
+Rejection codes (422, `FileIntakeResponse.code`): `INVALID_FILE` (with a message such as "The file could not be opened
+as a PDF (damaged or incomplete)" or "Password-protected PDFs cannot be processed…"), `DUPLICATE_FILE` (same SHA-256
+already uploaded **by this vendor**, any batch — another vendor's identical file is neither blocked nor revealed;
+SHA-256 is a duplicate check, not malware detection), `NESTED_FOLDER` (file in a sub-folder of a folder upload),
+`SOURCE_MISMATCH` (declared `source` ≠ batch source). Max **100 accepted files per batch**; one file per request.
+Tests: `PdfFilesTest`, `RealPdfUploadIntakeTest`. Six synthetic sample PDFs for trying the screen are in
+`react-handoff/sample-invoices/` — examples only.
 
-**Temporary free demo only** (`render-free-demo`): before every other rule, the file must be one of the six published
-synthetic fixtures in `react-handoff/demo-fixtures/` (exact bytes, SHA-256 allowlist). Anything else → 422
-`NOT_A_DEMO_FIXTURE`, nothing is stored, and the response and the batch's rejection list show the neutral name
-`file-not-accepted-by-demo.pdf` instead of the uploaded file's own name. Match rejected rows by request order, not by
-`fileName`. Other environments do not have this rule.
-
-Side effects of a 202: the PDF is written to private storage under a random UUID (SHA-256 verified after writing),
-`invoice_documents` + `invoices` (`QUEUED`) + `extraction_jobs` rows are inserted in one transaction (the file is deleted
-again if that transaction fails), and the batch counters change. **Nothing calls Gemini during upload.**
+Side effects of a 202: the PDF is written to private storage under a random UUID — on Render a **private bucket**,
+locally a private folder; SHA-256 verified after writing — then `invoice_documents` + `invoices` (`QUEUED`) +
+`extraction_jobs` rows are inserted in one transaction (the stored file is deleted again if that transaction fails),
+and the batch counters change. If the storage write fails, no row is created and the request answers 500. **Nothing
+calls Gemini during upload**, and `QUEUED` means "accepted and waiting for extraction", never "extracted". Tests:
+`RealPdfUploadIntakeTest`, `S3DocumentStorageTest`.
 
 Concurrency / idempotency: uploads into one batch are serialised by a row lock; the same vendor uploading the same
 bytes into two batches at the same moment gets exactly one 202 and one 422 `DUPLICATE_FILE`. Therefore a file whose
@@ -226,7 +297,7 @@ another vendor's uploads.
 
 ### 3.4 Reviewer actions
 
-| # | Method & path | Handler | Auth / scope | CSRF | Request | Success | Errors | Tests |
+| # | Method & path | Handler | Auth / scope | Writes | Request | Success | Errors | Tests |
 |---|---|---|---|---|---|---|---|---|
 | 22 | `PUT /api/invoices/{id}` | `InvoiceVersionController.saveCorrection` | REVIEWER assigned to it (workflow invoices, status `NEEDS_REVIEW`) / ADMIN only for **legacy** invoices | yes | `InvoiceUpdate` (complete invoice, below) | 200 `{changed: true, invoice}` = new version; `{changed: false, invoice}` when identical (no version) | 400 `fieldErrors` (unknown/non-editable fields, formats, > max items), 403 admin on workflow invoice, 404, **409** stale `baseVersion` or not editable, 422 arithmetic check failed | `InvoiceVersionControllerTest`, `InvoiceVersioningPgIntegrationTest`, `AuthPgIntegrationTest` |
 | 23 | `POST /api/invoices/{id}/submit` | `ReviewController.submit` | REVIEWER (assigned) | yes | `{"version": n}` | 200 `Invoice` (`PENDING_APPROVAL`, `submittedVersion: n`) | 404, 409 not current version / not `NEEDS_REVIEW`, 422 current data fails a check or duplicates an earlier invoice of the same vendor | `ReviewApprovalPgIntegrationTest`, `BatchQueuePgIntegrationTest` |
@@ -244,7 +315,7 @@ saved in between — reload). Versions are immutable; history is never rewritten
 
 ### 3.5 Admin
 
-| # | Method & path | Handler | CSRF | Request | Success | Errors / notes | Tests |
+| # | Method & path | Handler | Writes | Request | Success | Errors / notes | Tests |
 |---|---|---|---|---|---|---|---|
 | 24 | `GET /api/admin/users` | `AdminUserController.list` | – | – | 200 `User[]` | – | `AuthSecurityWebTest` |
 | 25 | `POST /api/admin/users` | `AdminUserController.create` | yes | `{email, displayName?, role, password}` — password 12–72 **bytes**, displayName ≤ 100 (blank → e-mail name) | 201 `User` | 400 `fieldErrors` (all problems together), 409 e-mail exists | `AuthSecurityWebTest`, `AuthPgIntegrationTest` |
@@ -287,7 +358,9 @@ until an audit sample exists). Tests: `DashboardPgIntegrationTest`, `DashboardMe
 ## 4. Schemas (response shapes)
 
 ```jsonc
-// Me (login, /api/auth/me)
+// LoginResponse (POST /api/auth/login) - section 1.1
+{ "accessToken": "eyJ…", "tokenType": "Bearer", "expiresIn": 1800, "expiresAt": "2026-10-28T10:30:00Z", "user": { /* Me */ } }
+// Me (/api/auth/me, and LoginResponse.user)
 { "id": 7, "email": "reviewer7@example.test", "name": "Reviewer Seven", "displayName": "Reviewer Seven", "role": "REVIEWER" }
 // User (admin) = Me + "enabled", "createdAt", "updatedAt" (never a password hash)
 // name = displayName when filled in, otherwise the e-mail before "@". Display "name" everywhere.
@@ -367,19 +440,33 @@ none of these is a failure.
 
 `GET /api/invoices/{id}/document` (preferred; `GET /api/documents/{sourceDocument.id}` still works) streams the exact
 uploaded bytes. Headers: `Content-Type: application/pdf`, `Content-Disposition: inline; filename="…"`,
-`X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `X-Frame-Options: SAMEORIGIN`. Same 404 rule as the
-invoice. Because the frame rule is `SAMEORIGIN`, embed it in an `<iframe>`/`<object>` **only from the same origin**
-(section 1.3); offer "Open in new tab" as a fallback. Bytes are re-checked against the stored SHA-256 on every read
+`X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `X-Frame-Options: DENY`. Same 404 rule as the invoice.
+
+The request needs the Bearer header, so an `<iframe src="/api/invoices/41/document">` cannot load it (the browser
+would not send the token). Fetch the bytes with the API client and show a local object URL instead:
+
+```js
+const res = await api(`/api/invoices/${id}/document`);
+if (!res.ok) { /* 404 = not yours / missing; 500 = integrity failure */ }
+const url = URL.createObjectURL(await res.blob());   // blob: URL, lives only in this tab
+iframe.src = url;                                     // or <object data={url} type="application/pdf">
+// when the reviewer leaves the invoice: URL.revokeObjectURL(url);
+```
+
+`X-Frame-Options: DENY` does not affect a `blob:` URL (it is not a response from the API). "Open in new tab" =
+`window.open(url)` with the same object URL. Bytes are re-checked against the stored SHA-256 on every read
 (mismatch → 500, never served). The PDF never changes when a reviewer saves a correction.
 
 ## 7. Implementing the React app
 
-1. **Start-up:** `GET /api/auth/me` → 200: route by `role`; 401: show login (this response also sets `XSRF-TOKEN`).
-2. **Login:** `POST /api/auth/login` `{email, password}` with `X-XSRF-TOKEN` → 200 `Me` → route by `role`. 401 →
-   generic "wrong e-mail or password". 429 → show the lock message. Never store the password; the token is never visible.
-3. **Logout:** `POST /api/auth/logout` (CSRF). "Log out everywhere": `POST /api/auth/logout-all`. Clear all cached data.
-4. **Stale session:** any 401 outside login → clear state, show login with "your session ended", then return the user to
-   where they were. A 403 with the CSRF message → do one `GET /api/auth/me` and let the user retry the action.
+1. **Start-up:** no token in memory → show login (a page reload always starts here, by design).
+2. **Login:** `POST /api/auth/login` `{email, password}` → 200: keep `accessToken` in memory, route by `user.role`.
+   401 → generic "wrong e-mail or password". 429 → show the lock message. Never store the password. Optionally start a
+   timer from `expiresIn` to warn the user shortly before the session ends.
+3. **Logout:** forget the token and clear all cached data (no server call needed). "Log out everywhere":
+   `POST /api/auth/logout-all` with the token, then forget it.
+4. **Stale session:** any 401 outside login → forget the token, clear state, show login with "your session ended", then
+   return the user to where they were.
 5. **Permissions in the UI:** derive visible screens from `Me.role` only. Hide what a role cannot do, but expect the
    server to refuse anyway (403/404) and show its message.
 6. **Vendor upload:** `GET /api/cloud-sources` + `GET /api/categories` → create the batch **only on a user click**
@@ -411,7 +498,7 @@ invoice. Because the frame rule is `SAMEORIGIN`, embed it in an `<iframe>`/`<obj
 ## 8. Rules that stay in the Java backend (never only in React)
 
 Authentication and token revocation; role checks per URL; per-object visibility (vendor = own, reviewer = assigned,
-404 otherwise); CSRF; file type/size/signature checks, SHA-256 and per-vendor duplicate detection; batch limits (100
+404 otherwise); file type/size/signature/PDF-structure checks, SHA-256 and per-vendor duplicate detection; batch limits (100
 files) and ownership; category ↔ reviewer matching for assignment; the status machine and who may move which status;
 exact-version rules for save/submit/approve/reject (409); the arithmetic and format checks on invoice data
 (`InvoiceExtractionValidator`) and the duplicate-invoice block at submit; immutable version history and audit events;
@@ -425,13 +512,20 @@ server's answer.
 - No total count in list responses: page until a page comes back shorter than `size`.
 - No server-sent events / websockets: status changes are discovered by polling.
 - `PUT /api/admin/categories/{code}/active` has no HTTP-level test yet.
-- Cross-origin hosting is not supported (section 1.3).
+- Cross-origin hosting needs the backend owner to set `INVOICE_CORS_ALLOWED_ORIGINS` (section 1.2).
+- Extraction runs only where the owner has enabled the worker **and** confirmed a paid Gemini project
+  (`INVOICE_GEMINI_PAID_TIER_CONFIRMED=true`). Otherwise uploads stay `QUEUED` and `GET /api/admin/queue/status`
+  explains why in `idleReason` — that is not a bug.
+- The Bearer flow is tested in the repository (MockMvc + PostgreSQL integration tests), **not yet against a deployed
+  service** (see the note at the top).
 - Cloud pickers: frontend work, not live-tested.
 
 ## 10. Compatibility history (still relevant to existing clients)
 
 | Change | Effect |
 |---|---|
+| 2026-10-28: cookie + CSRF replaced by `Authorization: Bearer`; login returns `{accessToken, tokenType, expiresIn, expiresAt, user}`; `POST /api/auth/logout` removed; optional exact-origin CORS | section 1.3 |
+| 2026-10-28: temporary free-demo profile removed (no fixture allow-list, no `@example.test` rule); upload also checks that the PDF really opens | any valid invoice PDF is accepted; broken/password-protected PDFs → 422 `INVALID_FILE` |
 | 2026-10-27: backend API-only; old pages removed; `GET /api/health` added | `GET /`, `*.html`, `/css/**`, `/js/**` now 401/403 |
 | 2026-10-27: cookie `TASK8_AUTH` → `INVOICE_PROCESS_AUTH`; JWT `iss`/`aud` renamed | everyone logs in once more |
 | 2026-10-23: `name` on `Me`/`User`, `changedByName`, `actorName`, workload `name` | additive |
@@ -444,3 +538,32 @@ server's answer.
 | `PUT /api/admin/users/{id}/display-name` | new route |
 | duplicates computed **only within the same vendor**; submit → 422 while the data duplicates the vendor's earlier invoice | behaviour change |
 | assignment changes appear in `/events` with `fromStatus == toStatus` | display as assignment history |
+
+## 11. Reference screens → endpoints
+
+The owner has screenshots of the retired HTML pages (login, vendor, reviewer, admin). They are **layout references
+only** — they are not in this repository (they show real accounts) and the React app is built from scratch. What each
+screen part calls:
+
+| Screen part (reference) | Calls |
+|---|---|
+| **Login** — e-mail, password, "Sign in"; "session ends after 30 minutes" | `POST /api/auth/login` → keep `accessToken`, route by `user.role`; show `expiresIn` |
+| Header — name, role badge, "Log out" | `user.name`, `user.role` from login (or `GET /api/auth/me`); log out = forget the token |
+| **Vendor** "This week" tiles (received, queued, being reviewed, approved, failed, Gemini calls, tokens) | `GET /api/dashboard/vendor?days=7` |
+| Vendor "New batch" — label, category, "Files from", "Start batch" | `GET /api/categories`, `GET /api/cloud-sources`, `POST /api/batches` |
+| Vendor file picker / upload rows | `POST /api/batches/{id}/files` (one file per request) → 202 / 422 per row; then `POST /api/batches/{id}/close` |
+| Vendor "My batches" table (accepted, rejected, status) and batch detail | `GET /api/batches`, `GET /api/batches/{id}` (poll ~10 s while something is `QUEUED`/`PROCESSING`) |
+| **Reviewer** "Today" tiles | `GET /api/dashboard/reviewer?days=1` |
+| Reviewer "Assigned to me" — To review / History | `GET /api/invoices?status=NEEDS_REVIEW`, and other statuses for history |
+| Reviewer left: "Original PDF (as uploaded by the vendor)" + SHA-256 note | `GET /api/invoices/{id}/document` → blob URL (section 6); `sourceDocument.sha256` from `GET /api/invoices/{id}` |
+| Reviewer right: "Why it needs attention", "Automatic checks" | `GET /api/invoices/{id}/review-reasons`, `GET /api/invoices/{id}/checks` |
+| Reviewer editable invoice data + line items + totals + "Reason for the correction" | `GET /api/invoices/{id}` to fill; **Save correction** = `PUT /api/invoices/{id}` (complete body, `baseVersion`) |
+| Reviewer "Submit this version for approval" | `POST /api/invoices/{id}/submit {"version": currentVersion}` |
+| Reviewer "Versions" list (V2 · name · date · changes) | `GET /api/invoices/{id}/versions`, compare: `GET …/versions/compare?from=1&to=2` |
+| **Admin** Dashboard tiles, queue & Gemini pacing, reviewer workload, quality, Gemini usage | `GET /api/dashboard/admin?days=7`, `GET /api/admin/queue/status` |
+| Admin "Intake & assignment" — set category, choose reviewer, assign / reassign | `GET /api/admin/intake`, `PUT /api/admin/invoices/{id}/category`, `POST /api/admin/assignments` |
+| Admin "Waiting for approval" — approve / reject / send back | `GET /api/invoices?status=PENDING_APPROVAL`, `POST /api/invoices/{id}/approve` · `/reject` · `/send-back` |
+| Admin "Failed extractions" — requeue | `GET /api/invoices?status=FAILED`, `POST /api/invoices/{id}/requeue` |
+| Admin "Approved and rejected" — reopen with reason | `GET /api/invoices?status=APPROVED` / `REJECTED`, `POST /api/invoices/{id}/reopen` |
+| Admin "Users" — create, rename, role, disable, reviewer categories | `GET/POST /api/admin/users`, `PUT …/{id}/display-name`, `…/role`, `…/enabled`, `GET/PUT …/{id}/categories` |
+| Admin "Categories" — add, deactivate | `GET/POST /api/admin/categories`, `PUT /api/admin/categories/{code}/active` |

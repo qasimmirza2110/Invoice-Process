@@ -18,7 +18,7 @@ import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.web.servlet.MockMvc;
 
-import javax.servlet.http.Cookie;
+import org.springframework.test.web.servlet.request.RequestPostProcessor;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -26,7 +26,6 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -50,49 +49,50 @@ class BatchRouteProtectionWebTest {
 
     @Test
     void batchesNeedAVendorOrAdminLogin() throws Exception {
-        Cookie reviewer = TestLogins.cookieFor(TestLogins.user(3, Role.REVIEWER), users, tokenService);
+        RequestPostProcessor reviewer = TestLogins.bearerFor(TestLogins.user(3, Role.REVIEWER), users, tokenService);
 
         mvc.perform(get("/api/batches")).andExpect(status().isUnauthorized());
-        mvc.perform(get("/api/batches").cookie(reviewer)).andExpect(status().isForbidden());
-        mvc.perform(multipart("/api/batches/1/files").file(pdf).cookie(reviewer).with(csrf())).andExpect(status().isForbidden());
+        mvc.perform(get("/api/batches").with(reviewer)).andExpect(status().isForbidden());
+        mvc.perform(multipart("/api/batches/1/files").file(pdf).with(reviewer)).andExpect(status().isForbidden());
         verifyNoInteractions(intakeService);
     }
 
     @Test
-    void uploadAnswers202WhenQueuedAnd422WhenRejectedAndNeedsCsrf() throws Exception {
-        Cookie vendor = TestLogins.cookieFor(TestLogins.user(2, Role.VENDOR), users, tokenService);
+    void uploadAnswers202WhenQueuedAnd422WhenRejectedAndNeedsABearerToken() throws Exception {
+        RequestPostProcessor vendor = TestLogins.bearerFor(TestLogins.user(2, Role.VENDOR), users, tokenService);
 
-        mvc.perform(multipart("/api/batches/1/files").file(pdf).cookie(vendor)).andExpect(status().isForbidden());
+        mvc.perform(multipart("/api/batches/1/files").file(pdf)).andExpect(status().isUnauthorized());
+        verifyNoInteractions(intakeService);
 
         when(intakeService.addFile(eq(1L), any(), any(), any())).thenReturn(FileIntakeResponse.accepted("a.pdf", 50L));
-        mvc.perform(multipart("/api/batches/1/files").file(pdf).cookie(vendor).with(csrf()))
+        mvc.perform(multipart("/api/batches/1/files").file(pdf).with(vendor))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.accepted").value(true))
                 .andExpect(jsonPath("$.status").value("QUEUED"));
 
         when(intakeService.addFile(eq(2L), any(), any(), any()))
                 .thenReturn(FileIntakeResponse.rejected("a.pdf", "INVALID_FILE", "File content is not a valid PDF"));
-        mvc.perform(multipart("/api/batches/2/files").file(pdf).cookie(vendor).with(csrf()))
+        mvc.perform(multipart("/api/batches/2/files").file(pdf).with(vendor))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.code").value("INVALID_FILE"));
     }
 
     @Test
     void categoriesAreReadableByAnyoneLoggedInButManagedByAdminsOnly() throws Exception {
-        Cookie vendor = TestLogins.cookieFor(TestLogins.user(2, Role.VENDOR), users, tokenService);
+        RequestPostProcessor vendor = TestLogins.bearerFor(TestLogins.user(2, Role.VENDOR), users, tokenService);
 
         mvc.perform(get("/api/categories")).andExpect(status().isUnauthorized());
-        mvc.perform(get("/api/categories").cookie(vendor)).andExpect(status().isOk());
-        mvc.perform(post("/api/admin/categories").cookie(vendor).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+        mvc.perform(get("/api/categories").with(vendor)).andExpect(status().isOk());
+        mvc.perform(post("/api/admin/categories").with(vendor).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"code\":\"X1\",\"displayName\":\"X\"}")).andExpect(status().isForbidden());
     }
 
     @Test
     void theDeclaredSourceIsPassedToTheIntakeServiceUnchanged() throws Exception {
-        Cookie vendor = TestLogins.cookieFor(TestLogins.user(2, Role.VENDOR), users, tokenService);
+        RequestPostProcessor vendor = TestLogins.bearerFor(TestLogins.user(2, Role.VENDOR), users, tokenService);
         when(intakeService.addFile(eq(3L), any(), isNull(), eq("GOOGLE_DRIVE")))
                 .thenReturn(FileIntakeResponse.rejected("a.pdf", "SOURCE_MISMATCH", "This batch only takes files from LOCAL"));
-        mvc.perform(multipart("/api/batches/3/files").file(pdf).param("source", "GOOGLE_DRIVE").cookie(vendor).with(csrf()))
+        mvc.perform(multipart("/api/batches/3/files").file(pdf).param("source", "GOOGLE_DRIVE").with(vendor))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.code").value("SOURCE_MISMATCH"));
         verify(intakeService).addFile(eq(3L), any(), isNull(), eq("GOOGLE_DRIVE"));
@@ -100,12 +100,12 @@ class BatchRouteProtectionWebTest {
 
     @Test
     void cloudSourcesAreForVendorsAndAdminsOnly() throws Exception {
-        Cookie vendor = TestLogins.cookieFor(TestLogins.user(2, Role.VENDOR), users, tokenService);
-        Cookie reviewer = TestLogins.cookieFor(TestLogins.user(3, Role.REVIEWER), users, tokenService);
+        RequestPostProcessor vendor = TestLogins.bearerFor(TestLogins.user(2, Role.VENDOR), users, tokenService);
+        RequestPostProcessor reviewer = TestLogins.bearerFor(TestLogins.user(3, Role.REVIEWER), users, tokenService);
         when(cloudSources.describeAll()).thenReturn(java.util.Collections.emptyList());
 
         mvc.perform(get("/api/cloud-sources")).andExpect(status().isUnauthorized());
-        mvc.perform(get("/api/cloud-sources").cookie(reviewer)).andExpect(status().isForbidden());
-        mvc.perform(get("/api/cloud-sources").cookie(vendor)).andExpect(status().isOk());
+        mvc.perform(get("/api/cloud-sources").with(reviewer)).andExpect(status().isForbidden());
+        mvc.perform(get("/api/cloud-sources").with(vendor)).andExpect(status().isOk());
     }
 }

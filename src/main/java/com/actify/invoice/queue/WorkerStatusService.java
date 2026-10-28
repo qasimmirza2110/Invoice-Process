@@ -1,5 +1,6 @@
 package com.actify.invoice.queue;
 
+import com.actify.invoice.config.GeminiConfig;
 import com.actify.invoice.quota.GeminiQuotaGuard;
 import com.actify.invoice.quota.QuotaStatus;
 import org.springframework.stereotype.Service;
@@ -41,9 +42,9 @@ public class WorkerStatusService {
         return quotaGuard.status();
     }
 
-    /** true when the worker may actually pick up jobs (enabled AND a key AND limits configured). */
+    /** true when the worker may actually pick up jobs (enabled AND a key AND limits AND data policy). */
     public boolean isWorkerRunning(QuotaStatus quota) {
-        return worker.isEnabled() && worker.hasApiKey() && quota.isConfigured();
+        return worker.isEnabled() && worker.hasApiKey() && quota.isConfigured() && worker.isDocumentSendingAllowed();
     }
 
     /** Why queued jobs are not being processed right now, or null/the last pacing reason when the worker runs. */
@@ -55,6 +56,9 @@ public class WorkerStatusService {
         }
         if (!worker.hasApiKey()) {
             return "Extraction is not configured: GEMINI_API_KEY is not set, so the worker stays idle.";
+        }
+        if (!worker.isDocumentSendingAllowed()) {
+            return GeminiConfig.PAID_TIER_BLOCKED_REASON;
         }
         if (!quota.isConfigured()) {
             return "Gemini limits are not configured: " + quota.getConfigurationProblem();
