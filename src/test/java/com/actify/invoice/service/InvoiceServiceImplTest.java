@@ -76,8 +76,8 @@ class InvoiceServiceImplTest {
 
     private InvoiceServiceImpl service;
 
-    private final MockMultipartFile pdf = new MockMultipartFile("file", "invoice.pdf", "application/pdf",
-            "%PDF-1.4 synthetic invoice".getBytes(StandardCharsets.US_ASCII));
+    private static final byte[] PDF_BYTES = TestPdfs.onePage("service test");
+    private final MockMultipartFile pdf = new MockMultipartFile("file", "invoice.pdf", "application/pdf", PDF_BYTES);
 
     @BeforeEach
     void setUp() {
@@ -439,7 +439,7 @@ class InvoiceServiceImplTest {
 
         ArgumentCaptor<byte[]> storedBytes = ArgumentCaptor.forClass(byte[].class);
         verify(documentStorage).store(storedBytes.capture());
-        assertThat(storedBytes.getValue()).isEqualTo("%PDF-1.4 synthetic invoice".getBytes(StandardCharsets.US_ASCII));
+        assertThat(storedBytes.getValue()).isEqualTo(PDF_BYTES);
         Invoice saved = lastSaved();
         assertThat(saved.getSourceDocument().getId()).isEqualTo("11111111-2222-4333-8444-555555555555");
         assertThat(saved.getSourceDocument().getContentType()).isEqualTo("application/pdf");

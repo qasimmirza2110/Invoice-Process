@@ -138,18 +138,20 @@
 <body>
 <a class="skip" href="#main">Skip to content</a>
 
+
 <header class="top">
   <div class="wrap">
     <button class="theme-btn" type="button" id="theme-toggle" aria-label="Switch colour theme">Theme</button>
     <p class="eyebrow">Actify Invoice Process &middot; Backend handoff for the React developer</p>
     <h1>Invoice Process API &mdash; React integration guide</h1>
     <p class="lede">Everything needed to build a new React frontend from an empty folder against the real Spring Boot
-      API: what the backend does, which endpoint powers each screen (especially Admin), how login and CSRF work, how to
-      test safely, and what the temporary free demo can and cannot do.</p>
+      API: what the backend does, which endpoint powers each screen of the reference design, how login with a Bearer
+      token works, how to upload PDFs, and how to test safely.</p>
     <div class="badges">
-      <span class="badge bad">TEMPORARY DEMO &middot; SYNTHETIC DATA ONLY &middot; NOT PRODUCTION</span>
-      <span class="badge">API-only backend &middot; 47 routes</span>
-      <span class="badge">Same-origin cookie + CSRF</span>
+      <span class="badge">API-only backend &middot; 46 routes</span>
+      <span class="badge">Login &rarr; Bearer token (JWT)</span>
+      <span class="badge ok">No cookies &middot; no CSRF header</span>
+      <span class="badge warn">Check which release is deployed first</span>
     </div>
   </div>
 </header>
@@ -160,15 +162,16 @@
       <li><a href="#start">Start here</a></li>
       <li><a href="#status">Handoff status</a></li>
       <li><a href="#basics">What calls what</a></li>
-      <li><a href="#roles">Roles at a glance</a></li>
-      <li><a href="#demo">Free demo: what works</a></li>
+      <li><a href="#roles">Roles and the invoice lifecycle</a></li>
+      <li><a href="#screens">Reference screens &rarr; API</a></li>
+      <li><a href="#environment">What works where</a></li>
       <li><a href="#setup">Set up React from zero</a></li>
       <li><a href="#client">The one API client</a></li>
-      <li><a href="#auth">Login, cookies, CSRF</a></li>
+      <li><a href="#auth">Login and the Bearer token</a></li>
       <li><a href="#admin">Admin screens &rarr; API</a></li>
       <li><a href="#vendor">Vendor screens &rarr; API</a></li>
       <li><a href="#reviewer">Reviewer screens &rarr; API</a></li>
-      <li><a href="#routes">All 47 routes</a></li>
+      <li><a href="#routes">All 46 routes</a></li>
       <li><a href="#errors">Errors and UI states</a></li>
       <li><a href="#testing">Testing</a></li>
       <li><a href="#first-session">First integration session</a></li>
@@ -183,22 +186,23 @@
     <section id="start" aria-labelledby="start-h">
       <h2 id="start-h">Start here</h2>
       <ol>
-        <li>Read sections <a href="#basics">&ldquo;What calls what&rdquo;</a>, <a href="#roles">&ldquo;Roles&rdquo;</a> and
-          <a href="#demo">&ldquo;Free demo&rdquo;</a> (15 minutes). They explain the whole system.</li>
-        <li>Follow <a href="#setup">&ldquo;Set up React from zero&rdquo;</a> step by step, then copy
+        <li>Read <a href="#basics">&ldquo;What calls what&rdquo;</a>, <a href="#roles">&ldquo;Roles&rdquo;</a> and
+          <a href="#screens">&ldquo;Reference screens&rdquo;</a> (15 minutes). They explain the whole system.</li>
+        <li>Follow <a href="#setup">&ldquo;Set up React from zero&rdquo;</a>, then copy
           <a href="#client">&ldquo;The one API client&rdquo;</a>.</li>
         <li>Build screens in this order: login &rarr; navigation by role &rarr; Admin users and categories &rarr; Vendor
-          batches and upload &rarr; Admin intake board &rarr; dashboards &rarr; read-only invoice detail &rarr;
-          review/approval screens (contract only in the demo).</li>
+          batches and upload &rarr; Admin intake board &rarr; dashboards &rarr; invoice detail with PDF &rarr;
+          reviewer correction &rarr; admin approval screens.</li>
         <li>For every field and status code, the formal contract wins:
           <a href="REACT_BACKEND_HANDOFF.md">REACT_BACKEND_HANDOFF.md</a> and <a href="openapi.yaml">openapi.yaml</a>
           (<a href="API_CONTRACT.md">API_CONTRACT.md</a> only points to them). If the API behaves differently from
           those files, report it (<a href="#first-session">how</a>) &mdash; never work around it.</li>
       </ol>
-      <div class="callout bad">
-        <p><strong>TEMPORARY DEMO &mdash; SYNTHETIC DATA ONLY &mdash; NOT PRODUCTION.</strong> Never type a real
-          customer's name, e-mail, invoice or document into the demo. Login details for the demo accounts are sent to
-          you separately; they are never in this package.</p>
+      <div class="callout warn">
+        <p><strong>Real business data.</strong> This backend is meant for real vendors and real invoices. While you
+          develop, use only the test accounts the backend owner gives you and the synthetic sample PDFs in
+          <a href="react-handoff/sample-invoices/README.md">react-handoff/sample-invoices/</a>. Never put a real
+          invoice, a password or a token into Git, screenshots, chat or a bug report.</p>
       </div>
     </section>
 
@@ -216,16 +220,20 @@
             <tr><td>Health check</td><td>{{HEALTH_RESULT}}</td></tr>
             <tr><td>Checked at</td><td>{{HEALTH_CHECKED_AT}}</td></tr>
             <tr><td>Backend commit</td><td>{{BACKEND_COMMIT}}</td></tr>
-            <tr><td>Environment</td><td>Render Free web service, profile <code>render-free-demo</code>, Render Free Postgres</td></tr>
           </tbody>
         </table>
       </div>
       <div class="callout warn">
         <p><strong>What the health check proves:</strong> only that <code>GET /api/health</code> answered
-          <code>200 {"status":"UP"}</code> with the demo header at that moment &mdash; the process was running in demo
-          mode. It does <strong>not</strong> prove the database, login, CSRF, uploads or any of the other 46 routes.
-          You verify those in the browser during integration. A green &ldquo;Live&rdquo; label in Render proves the
-          same, no more.</p>
+          <code>200 {"status":"UP"}</code> at that moment &mdash; the process was running. It does <strong>not</strong>
+          prove the database, login, uploads, extraction or any other route. You verify those in the browser.</p>
+        <p><strong>What has been verified:</strong> every route in this guide matches the backend code and its automated
+          tests. Routes count as <strong>verified live</strong> only after the backend owner's post-deploy checks pass
+          on the new build &mdash; until then treat them as the target contract.</p>
+        <p><strong>Is this the Bearer release?</strong> Log in once (<a href="#first-session">first session</a>). If the
+          response body contains <code>"accessToken"</code>, it is. If instead you get a cookie, or 403 &ldquo;Missing or
+          invalid CSRF token&rdquo;, the service still runs the older cookie build &mdash; ask the backend owner to
+          deploy before you continue.</p>
       </div>
       <p class="muted">Details of the check: <a href="HANDOFF_VERIFICATION.md">HANDOFF_VERIFICATION.md</a> (in the
         package).</p>
@@ -236,23 +244,25 @@
       <p>The <strong>backend</strong> is a Java Spring Boot program that stores invoices in a PostgreSQL database. It
         has no web pages of its own: it only answers <strong>API requests</strong> &mdash; small HTTP messages such as
         &ldquo;give me the list of users&rdquo; &mdash; with <strong>JSON</strong> data. Your React app is the only
-        user interface. It runs in the browser, asks the API for data and shows it.</p>
+        user interface.</p>
+      <div class="callout">
+        <p>Opening the API's own address (<code>/</code>) in a browser answers <strong>401</strong>. That is
+          <strong>expected</strong> &mdash; there is no page there. The health check is
+          <code>GET /api/health</code> &rarr; <code>200 {"status":"UP"}</code>. On Render's Free plan the first request
+          after 15 idle minutes can take about a minute while the service wakes up.</p>
+      </div>
       <h3>One request, from click to screen</h3>
       <ol class="flow" aria-label="Request lifecycle">
         <li>The user opens the Admin &ldquo;Users&rdquo; page. React calls <code>api('/api/admin/users')</code>.</li>
-        <li>The browser sends <code>GET /api/admin/users</code> to the Vite dev server (same origin as the page) and
-          automatically attaches the login cookie.</li>
-        <li>The Vite proxy forwards the request unchanged to the deployed API.</li>
-        <li>Spring Security checks the cookie (who are you?) and the role (are you ADMIN?). No/invalid cookie &rarr;
-          401; wrong role &rarr; 403. Unsafe methods must also carry the CSRF header &rarr; otherwise 403.</li>
+        <li>The API client adds <code>Authorization: Bearer &lt;accessToken&gt;</code> (the token it got at login and
+          keeps in memory) and sends <code>GET /api/admin/users</code> to the Vite dev server.</li>
+        <li>The Vite proxy forwards the request unchanged to the API.</li>
+        <li>Spring Security checks the token (who are you?) and the role (are you ADMIN?). Missing/invalid/expired token
+          &rarr; 401; wrong role &rarr; 403.</li>
         <li>The controller calls a service, which reads PostgreSQL and turns database rows into a
           <strong>DTO</strong> (a fixed JSON shape such as <code>UserResponse</code>).</li>
-        <li>The JSON travels back through the proxy to the browser; React stores it in state and renders the table.</li>
+        <li>The JSON travels back to the browser; React stores it in state and renders the table.</li>
       </ol>
-      <div class="callout">
-        <p>React never talks to PostgreSQL and never reads data from an HTML page. Every piece of data &mdash; including
-          all Admin data &mdash; comes from one of the 47 API routes below, through your single API client.</p>
-      </div>
       <h3>What lives where</h3>
       <div class="grid2">
         <div class="card">
@@ -260,7 +270,7 @@
           <ul>
             <li>Who is logged in, and what each role may call</li>
             <li>Which objects a user may see (vendor = own, reviewer = assigned, admin = all; others get 404)</li>
-            <li>CSRF, file checks, duplicates, the invoice status rules, version conflicts (409)</li>
+            <li>PDF checks, duplicates, the invoice status rules, version conflicts (409)</li>
             <li>Validation of every field (400 with <code>fieldErrors</code>, 422 for business rules)</li>
           </ul>
         </div>
@@ -279,52 +289,92 @@
     </section>
 
     <section id="roles" aria-labelledby="roles-h">
-      <h2 id="roles-h">Roles at a glance</h2>
-      <p>Every account has exactly one role. <code>GET /api/auth/me</code> returns it; build the navigation from it.</p>
+      <h2 id="roles-h">Roles and the invoice lifecycle</h2>
+      <p>Every account has exactly one role, returned at login (<code>user.role</code>) and by
+        <code>GET /api/auth/me</code>. There is <strong>no sign-up page</strong>: the first ADMIN is created by the
+        backend owner, and only an ADMIN creates further users.</p>
       <div class="table-wrap"><table>
         <thead><tr><th>Role</th><th>Does</th><th>Sees</th><th>Main screens</th></tr></thead>
         <tbody>
           <tr><td><strong>VENDOR</strong></td><td>Uploads invoice PDFs in batches</td><td>Only own batches and invoices</td><td>This week (dashboard), New batch + upload, My batches, Batch detail, Invoice detail (read-only)</td></tr>
-          <tr><td><strong>REVIEWER</strong></td><td>Corrects extracted data and submits it for approval</td><td>Only invoices assigned to them</td><td>Today (dashboard), Assigned to me, Invoice review</td></tr>
+          <tr><td><strong>REVIEWER</strong></td><td>Corrects extracted data and submits one exact version for approval</td><td>Only invoices assigned to them</td><td>Today (dashboard), Assigned to me, Invoice review (PDF left, editable data right)</td></tr>
           <tr><td><strong>ADMIN</strong></td><td>Manages users, categories, assignment, decisions, queue</td><td>Everything</td><td>Dashboard, Intake &amp; assignment, Waiting for approval, Failed extractions, Approved and rejected, Users, Categories, Queue status</td></tr>
         </tbody>
       </table></div>
-      <p class="muted">Screen names follow the earlier (retired) HTML pages so the team recognises them; design them
-        fresh. No screenshots of the old pages were available while this guide was written.</p>
+      <h3>Invoice lifecycle (statuses come from the backend)</h3>
+      <ol class="flow" aria-label="Invoice lifecycle">
+        <li><strong>Vendor</strong> creates a batch (category, source), uploads PDFs one by one &rarr; each accepted file
+          becomes an invoice with status <code>QUEUED</code>. &ldquo;Accepted&rdquo; means stored and waiting &mdash; not
+          extracted.</li>
+        <li>The <strong>extraction worker</strong> sends the PDF to Gemini (only where the owner enabled it):
+          <code>QUEUED</code> &rarr; <code>PROCESSING</code> &rarr; <code>NEEDS_REVIEW</code> (version V1 = what the AI
+          read), or <code>FAILED</code> after 3 attempts.</li>
+        <li><strong>Admin</strong> sets the category and assigns a reviewer who handles that category (this can happen
+          already while the invoice is <code>QUEUED</code>).</li>
+        <li><strong>Reviewer</strong> compares the original PDF with the data, saves corrections &mdash; each save is a
+          new, unchangeable version (V2, V3 &hellip;) linked to the same original PDF &mdash; and submits one exact
+          version: <code>PENDING_APPROVAL</code>.</li>
+        <li><strong>Admin</strong> approves (<code>APPROVED</code>), rejects (<code>REJECTED</code>) or sends it back
+          (<code>NEEDS_REVIEW</code>) after looking at all versions. Decided invoices can be reopened; failed ones
+          requeued.</li>
+        <li><strong>Vendor</strong> sees the current status of each upload in the batch detail.</li>
+      </ol>
     </section>
 
-    <section id="demo" aria-labelledby="demo-h">
-      <h2 id="demo-h">Free demo: what works and what cannot <span class="demo-flag">TEMPORARY DEMO</span></h2>
+    <section id="screens" aria-labelledby="screens-h">
+      <h2 id="screens-h">Reference screens &rarr; API</h2>
+      <p>The backend owner has screenshots of the earlier HTML pages (login, vendor, reviewer, admin). They are a
+        <strong>layout reference only</strong> &mdash; build the React app from scratch, in your own components. The
+        screenshots are not part of this package because they show real accounts. Each visible part maps to these
+        calls:</p>
       <div class="table-wrap"><table>
-        <thead><tr><th>Part</th><th>In the demo (<code>render-free-demo</code>)</th></tr></thead>
+        <thead><tr><th>Screen part (reference)</th><th>API calls</th></tr></thead>
         <tbody>
-          <tr><td>Every response</td><td>Carries <code>X-Invoice-Demo: ephemeral-synthetic-only</code>. Show a small &ldquo;Demo environment&rdquo; badge when you see it.</td></tr>
-          <tr><td>Login, CSRF, roles, per-object access, validation</td><td class="yes">Identical to production &mdash; nothing relaxed.</td></tr>
-          <tr><td>Accounts</td><td>Only <code>@example.test</code> addresses can be created (others &rarr; 400). Planned personas: one ADMIN, two VENDOR, two REVIEWER &mdash; ask which exist; do not assume.</td></tr>
-          <tr><td>Uploads</td><td>Only the six fixture PDFs below. Any other file &rarr; 422 <code>NOT_A_DEMO_FIXTURE</code>, never stored, response <code>fileName</code> = <code>file-not-accepted-by-demo.pdf</code>.</td></tr>
-          <tr><td>Extraction (Gemini), worker, legacy extract</td><td class="no">Off. A successful upload stays <code>QUEUED</code> forever. Not a bug &mdash; do not fake it away.</td></tr>
-          <tr><td>Review, submit, approve, reject, send-back, reopen, requeue</td><td class="no">Unreachable: no invoice ever reaches <code>NEEDS_REVIEW</code> or later. Build these screens from the contract and label them &ldquo;not available in this demo&rdquo;.</td></tr>
-          <tr><td>Google Drive / OneDrive pickers</td><td>Not configured; <code>GET /api/cloud-sources</code> reports <code>NOT_CONFIGURED</code>. Offer local upload only.</td></tr>
-          <tr><td>PDF files</td><td>Ephemeral: lost on restart, redeploy and idle spin-down &rarr; document download answers 404 afterwards.</td></tr>
-          <tr><td>Speed</td><td>The service sleeps after 15 idle minutes; the next request takes about a minute.</td></tr>
-          <tr><td>Database</td><td>Render Free Postgres: 1 GB, <strong>expires 30 days after creation</strong> (a short grace period does not make it permanent), no backups. All demo data can vanish.</td></tr>
+          <tr><td><strong>Login</strong>: e-mail, password, &ldquo;Sign in&rdquo;, &ldquo;session ends after 30 minutes&rdquo;</td><td><code>POST /api/auth/login</code> &rarr; keep <code>accessToken</code> in memory, route by <code>user.role</code>; the 30 minutes come from <code>expiresIn</code></td></tr>
+          <tr><td>Header: name, role badge, &ldquo;Log out&rdquo;</td><td><code>user.name</code>, <code>user.role</code>; log out = forget the token</td></tr>
+          <tr><td><strong>Vendor</strong> &ldquo;This week&rdquo; tiles (received, queued, being reviewed, approved, failed, Gemini calls, tokens reported)</td><td><code>GET /api/dashboard/vendor?days=7</code></td></tr>
+          <tr><td>Vendor &ldquo;New batch&rdquo;: label, category, &ldquo;Files from&rdquo;, &ldquo;Start batch&rdquo; (&ldquo;Up to 100 PDFs per batch, 10 MB each&rdquo;)</td><td><code>GET /api/categories</code>, <code>GET /api/cloud-sources</code>, on click <code>POST /api/batches</code></td></tr>
+          <tr><td>Vendor file picker and one result row per file</td><td><code>POST /api/batches/{id}/files</code> per file &rarr; 202 accepted / 422 rejected; then <code>POST /api/batches/{id}/close</code></td></tr>
+          <tr><td>Vendor &ldquo;My batches&rdquo; (label, status, accepted, rejected, created) and batch detail</td><td><code>GET /api/batches</code>, <code>GET /api/batches/{id}</code> (poll ~10 s while anything is <code>QUEUED</code>/<code>PROCESSING</code>)</td></tr>
+          <tr><td><strong>Reviewer</strong> &ldquo;Today&rdquo; tiles</td><td><code>GET /api/dashboard/reviewer?days=1</code></td></tr>
+          <tr><td>Reviewer &ldquo;Assigned to me&rdquo;: To review / History</td><td><code>GET /api/invoices?status=NEEDS_REVIEW</code>; history: other statuses</td></tr>
+          <tr><td>Reviewer left: &ldquo;Original PDF (as uploaded by the vendor)&rdquo;, size, &ldquo;SHA-256 matches&rdquo;</td><td><code>GET /api/invoices/{id}/document</code> &rarr; blob URL (<a href="#client">PDF preview</a>); size/SHA-256 from <code>sourceDocument</code> in <code>GET /api/invoices/{id}</code></td></tr>
+          <tr><td>Reviewer right: &ldquo;Why it needs attention&rdquo;, &ldquo;Automatic checks&rdquo;</td><td><code>GET /api/invoices/{id}/review-reasons</code>, <code>GET /api/invoices/{id}/checks</code></td></tr>
+          <tr><td>Reviewer invoice data, line items (Add line / Remove), totals, &ldquo;Reason for the correction&rdquo;, <strong>Save correction</strong></td><td>fill from <code>GET /api/invoices/{id}</code>; save = <code>PUT /api/invoices/{id}</code> with the <strong>complete</strong> invoice and <code>baseVersion</code></td></tr>
+          <tr><td>Reviewer &ldquo;Submit this version for approval&rdquo;</td><td><code>POST /api/invoices/{id}/submit {"version": currentVersion}</code></td></tr>
+          <tr><td>Reviewer &ldquo;Versions&rdquo; (V2 &middot; name &middot; date &middot; N changes; V1 &middot; LLM extraction)</td><td><code>GET /api/invoices/{id}/versions</code>; diff: <code>GET /api/invoices/{id}/versions/compare?from=1&amp;to=2</code></td></tr>
+          <tr><td><strong>Admin</strong> Dashboard: status tiles, &ldquo;Queue and Gemini pacing&rdquo;, reviewer workload, quality, Gemini usage per day / per vendor</td><td><code>GET /api/dashboard/admin?days=7</code>, <code>GET /api/admin/queue/status</code></td></tr>
+          <tr><td>Admin &ldquo;Intake &amp; assignment&rdquo;: category, reviewer, &ldquo;Assign selected&rdquo;, &ldquo;Reassign&rdquo;</td><td><code>GET /api/admin/intake</code>, <code>PUT /api/admin/invoices/{id}/category</code>, <code>POST /api/admin/assignments</code></td></tr>
+          <tr><td>Admin &ldquo;Waiting for approval&rdquo;</td><td><code>GET /api/invoices?status=PENDING_APPROVAL</code>; <code>POST /api/invoices/{id}/approve</code> &middot; <code>/reject</code> &middot; <code>/send-back</code></td></tr>
+          <tr><td>Admin &ldquo;Failed extractions&rdquo;</td><td><code>GET /api/invoices?status=FAILED</code>; <code>POST /api/invoices/{id}/requeue</code></td></tr>
+          <tr><td>Admin &ldquo;Approved and rejected&rdquo; with reason + &ldquo;Reopen&rdquo;</td><td><code>GET /api/invoices?status=APPROVED</code> / <code>REJECTED</code>; <code>POST /api/invoices/{id}/reopen</code></td></tr>
+          <tr><td>Admin &ldquo;Users&rdquo;: create (e-mail, display name, role, initial password 12+), Rename, role, Disable, reviewer categories + Save</td><td><code>GET/POST /api/admin/users</code>, <code>PUT /api/admin/users/{id}/display-name</code> &middot; <code>/role</code> &middot; <code>/enabled</code>, <code>GET/PUT /api/admin/users/{id}/categories</code></td></tr>
+          <tr><td>Admin &ldquo;Categories&rdquo;: code, name, &ldquo;Add category&rdquo;, Deactivate</td><td><code>GET/POST /api/admin/categories</code>, <code>PUT /api/admin/categories/{code}/active</code></td></tr>
         </tbody>
       </table></div>
-      <h3 id="fixtures">The six upload fixtures</h3>
-      <p>In <a href="react-handoff/demo-fixtures/README.md">react-handoff/demo-fixtures/</a>. Each vendor account can
-        upload each file once (then 422 <code>DUPLICATE_FILE</code>). Do not edit them &mdash; their exact bytes are the
-        allowlist.</p>
+    </section>
+
+    <section id="environment" aria-labelledby="environment-h">
+      <h2 id="environment-h">What works where</h2>
       <div class="table-wrap"><table>
-        <thead><tr><th>File</th><th>Invoice number inside</th></tr></thead>
+        <thead><tr><th>Part</th><th>Behaviour</th></tr></thead>
         <tbody>
-          <tr><td><a href="react-handoff/demo-fixtures/synthetic-demo-invoice-01.pdf">synthetic-demo-invoice-01.pdf</a></td><td>DEMO-0001</td></tr>
-          <tr><td><a href="react-handoff/demo-fixtures/synthetic-demo-invoice-02.pdf">synthetic-demo-invoice-02.pdf</a></td><td>DEMO-0002</td></tr>
-          <tr><td><a href="react-handoff/demo-fixtures/synthetic-demo-invoice-03.pdf">synthetic-demo-invoice-03.pdf</a></td><td>DEMO-0003</td></tr>
-          <tr><td><a href="react-handoff/demo-fixtures/synthetic-demo-invoice-04.pdf">synthetic-demo-invoice-04.pdf</a></td><td>DEMO-0004</td></tr>
-          <tr><td><a href="react-handoff/demo-fixtures/synthetic-demo-invoice-05.pdf">synthetic-demo-invoice-05.pdf</a></td><td>DEMO-0005</td></tr>
-          <tr><td><a href="react-handoff/demo-fixtures/synthetic-demo-invoice-06.pdf">synthetic-demo-invoice-06.pdf</a></td><td>DEMO-0006</td></tr>
+          <tr><td>Login, roles, per-object access, validation</td><td class="yes">Always on, identical everywhere.</td></tr>
+          <tr><td>Accounts</td><td>Any real e-mail address. Created only by an ADMIN (no sign-up). Ask the backend owner for your test accounts.</td></tr>
+          <tr><td>Uploads</td><td>Any valid invoice PDF up to 10 MB, one file per request, up to 100 per batch. Damaged or password-protected PDFs are rejected (422 <code>INVALID_FILE</code>).</td></tr>
+          <tr><td>Extraction (Gemini)</td><td>Runs only where the owner has switched the worker on <strong>and</strong> confirmed a paid Gemini project (real invoices must not go to the free tier). Otherwise uploads stay <code>QUEUED</code> and <code>GET /api/admin/queue/status</code> &rarr; <code>idleReason</code> says why. That is not a bug &mdash; never fake it in the UI.</td></tr>
+          <tr><td>Review, submit, approve, reject, send back, reopen, requeue</td><td>Need invoices that were extracted. Where extraction is off, build these screens from the contract and show the real (empty) lists.</td></tr>
+          <tr><td>Google Drive / OneDrive</td><td><code>GET /api/cloud-sources</code> says whether they are configured; usually <code>NOT_CONFIGURED</code> &mdash; then offer local upload only.</td></tr>
+          <tr><td>Speed</td><td>On Render's Free plan the service sleeps after 15 idle minutes; the next request takes about a minute. The free database also sleeps and wakes on the next query.</td></tr>
+          <tr><td>Free plans</td><td>API on Render Free; database and PDF bucket on Neon Free. No uptime promise; if the monthly free quota runs out, calls fail with 500 until the next month. Uploaded PDFs are kept in a private bucket and survive restarts. Demo data only           <tr><td>Speed</td><td>On Render's Free plan the service sleeps after 15 idle minutes; the next request takes about a minute.</td></tr>mdash; never a real client invoice.</td></tr>
         </tbody>
       </table></div>
+      <h3>Sample PDFs</h3>
+      <p>Six synthetic one-page invoices for trying the upload screen:
+        <a href="react-handoff/sample-invoices/README.md">react-handoff/sample-invoices/</a>
+        (<code>synthetic-sample-invoice-01.pdf</code> &hellip; <code>-06.pdf</code>). They are examples only &mdash;
+        the API accepts any valid invoice PDF. Each vendor can upload the same file once (then 422
+        <code>DUPLICATE_FILE</code>).</p>
     </section>
 
     <section id="setup" aria-labelledby="setup-h">
@@ -333,23 +383,19 @@
         <li><strong>Separate project.</strong> Create a new folder and Git repository for the frontend, outside the
           backend repository. Never put React files into the Java <code>src/main</code> folder: the backend does not
           serve web pages.</li>
-        <li><strong>Node.js.</strong> Install the current Node.js LTS (22.x works; the backend owner's machine uses
-          22.16.0). Check <code>node --version</code> and <code>npm --version</code>. The Vite &ldquo;Getting
-          Started&rdquo; page lists the minimum Node version &mdash; follow it if it differs.</li>
-        <li><strong>Scaffold</strong> a React + TypeScript app with Vite (fast dev server with the proxy we need):
+        <li><strong>Node.js.</strong> Install the current Node.js LTS. Check <code>node --version</code> and
+          <code>npm --version</code>. The Vite &ldquo;Getting Started&rdquo; page lists the minimum Node version.</li>
+        <li><strong>Scaffold</strong> a React + TypeScript app with Vite:
 <pre><code>npm create vite@latest invoice-process-web -- --template react-ts
 cd invoice-process-web
 npm install
-npm run dev          # opens http://localhost:5173 - stop it again with Ctrl+C</code></pre>
-          <code>npm create vite</code> copies a starter project; <code>npm install</code> downloads its
-          libraries into <code>node_modules</code>; <code>npm run dev</code> starts the local dev server.</li>
+npm run dev          # opens http://localhost:5173 - stop it again with Ctrl+C</code></pre></li>
         <li><strong>Add only what you need:</strong>
 <pre><code>npm install react-router @tanstack/react-query
 npm install -D vitest jsdom @testing-library/react @testing-library/user-event @testing-library/jest-dom openapi-typescript</code></pre>
-          <code>react-router</code> = pages and URLs (follow its current docs); <code>@tanstack/react-query</code> =
-          loading/caching/refetching server data; the <code>-D</code> packages are for tests and for generating
-          TypeScript types from <code>openapi.yaml</code>. Use plain controlled forms; add a form library only if forms
-          become hard to manage.</li>
+          <code>react-router</code> = pages and URLs; <code>@tanstack/react-query</code> = loading/caching/refetching
+          server data; the <code>-D</code> packages are for tests and for generating TypeScript types from
+          <code>openapi.yaml</code>.</li>
         <li><strong>Proxy and environment.</strong> Copy <a href="react-handoff/env.example">react-handoff/env.example</a>
           to <code>.env.local</code> and <a href="react-handoff/vite.config.example.ts">react-handoff/vite.config.example.ts</a>
           to <code>vite.config.ts</code>:
@@ -367,28 +413,28 @@ VITE_API_BASE_URL=</code></pre>
 <pre><code>src/
   api/          client.ts (the only fetch), schema.ts (generated), auth.ts, users.ts, categories.ts,
                 batches.ts, invoices.ts, intake.ts, decisions.ts, dashboards.ts
-  auth/         SessionProvider.tsx (who am I?), RequireRole.tsx (route guard)
-  components/   DataTable, Pagination, ConfirmDialog, Alert, EmptyState, LoadingState, FieldError, DemoBadge
+  auth/         SessionProvider.tsx (token + user in memory), RequireRole.tsx (route guard)
+  components/   DataTable, Pagination, ConfirmDialog, Alert, EmptyState, LoadingState, FieldError, PdfViewer
   features/
     admin/      UsersPage, CategoriesPage, IntakePage, ApprovalsPage, FailedPage, DecidedPage, QueuePage, AdminDashboard
     vendor/     VendorDashboard, NewBatchPage, BatchListPage, BatchDetailPage
     reviewer/   ReviewerDashboard, AssignedPage, InvoiceReviewPage
     invoices/   InvoiceDetail, PdfPanel, EventsList, VersionsList
   pages/        LoginPage, NotFoundPage, ForbiddenPage
-  styles/       tokens.css (colours, spacing), global.css
   test/         setup.ts, mock data clearly marked "unit-test mock"</code></pre></li>
         <li><strong>Scripts you will run</strong> (add <code>"test": "vitest run"</code> to <code>package.json</code>):
 <pre><code>npm run dev       # local development with the proxy
 npm run lint      # ESLint from the template - must report no errors
-npm run build     # runs the TypeScript check (tsc -b) and builds - must succeed
+npm run build     # runs the TypeScript check and builds - must succeed
 npm test          # Vitest unit tests - all must pass</code></pre></li>
       </ol>
     </section>
 
     <section id="client" aria-labelledby="client-h">
       <h2 id="client-h">The one API client</h2>
-      <p>Every component goes through this one file. It adds the CSRF header, sends JSON or files, parses errors in
-        one way and reports an expired session. Components never call <code>fetch</code> themselves.</p>
+      <p>Every component goes through this one file. It keeps the access token <strong>in memory</strong>, adds the
+        <code>Authorization</code> header, sends JSON or files, parses errors in one way and reports an ended session.
+        Components never call <code>fetch</code> themselves.</p>
 <pre><code>// src/api/client.ts
 export interface FieldError { field: string; message: string }
 
@@ -401,7 +447,7 @@ export interface ApiErrorBody {
   timestamp?: string;
   fieldErrors?: FieldError[] | null;
   errorId?: string;          // only on unexpected 500s: show it as a reference
-  code?: string | null;      // only on upload rejections (422), e.g. NOT_A_DEMO_FIXTURE
+  code?: string | null;      // only on upload rejections (422), e.g. INVALID_FILE, DUPLICATE_FILE
 }
 
 export class ApiError extends Error {
@@ -415,18 +461,18 @@ export class ApiError extends Error {
   }
 }
 
-const BASE = import.meta.env.VITE_API_BASE_URL ?? '';   // keep EMPTY: same origin through the proxy
+const BASE = import.meta.env.VITE_API_BASE_URL ?? '';   // EMPTY = same origin through the proxy
 
-/** Read at the moment of sending: login and logout replace the token. */
-export function readXsrfToken(): string {
-  const match = document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]*)/);
-  return match ? decodeURIComponent(match[1]) : '';
-}
+// The access token lives ONLY in this module's memory: not in localStorage, sessionStorage or a cookie.
+// A page reload therefore logs the user out - that is intended.
+let accessToken: string | null = null;
+export function setAccessToken(token: string | null): void { accessToken = token; }
+export function hasAccessToken(): boolean { return accessToken !== null; }
 
-let onUnauthorized: () =&gt; void = () =&gt; {};
-/** SessionProvider registers this; it only acts when the user WAS logged in. */
-export function setUnauthorizedHandler(handler: () =&gt; void): void {
-  onUnauthorized = handler;
+let onSessionEnded: () =&gt; void = () =&gt; {};
+/** SessionProvider registers this: forget the user and show the login page. */
+export function setSessionEndedHandler(handler: () =&gt; void): void {
+  onSessionEnded = handler;
 }
 
 type Query = Record&lt;string, string | number | boolean | undefined&gt;;
@@ -442,7 +488,7 @@ export interface RequestOptions {
 export async function api&lt;T&gt;(path: string, options: RequestOptions = {}): Promise&lt;T&gt; {
   const method = options.method ?? 'GET';
   const headers: Record&lt;string, string&gt; = { Accept: 'application/json' };
-  if (method !== 'GET') headers['X-XSRF-TOKEN'] = readXsrfToken();
+  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
 
   let body: BodyInit | undefined;
   if (options.json !== undefined) {
@@ -458,7 +504,7 @@ export async function api&lt;T&gt;(path: string, options: RequestOptions = {}): 
   }
   const url = BASE + path + (params.toString() ? `?${params.toString()}` : '');
 
-  const response = await fetch(url, { method, headers, body, credentials: 'same-origin', signal: options.signal });
+  const response = await fetch(url, { method, headers, body, signal: options.signal });
   const isJson = (response.headers.get('Content-Type') ?? '').includes('application/json');
 
   if (!response.ok) {
@@ -468,28 +514,33 @@ export async function api&lt;T&gt;(path: string, options: RequestOptions = {}): 
       status: response.status,                         // always the real HTTP status
       message: parsed.message ?? 'Unexpected response from the server.',
     };
-    if (response.status === 401) onUnauthorized();
+    if (response.status === 401 &amp;&amp; accessToken) {     // the token expired or was revoked
+      accessToken = null;
+      onSessionEnded();
+    }
     throw new ApiError(errorBody);
   }
-  if (response.status === 204) return undefined as T;  // logout, logout-all
+  if (response.status === 204) return undefined as T;  // logout-all
   if (isJson) return (await response.json()) as T;
   return (await response.blob()) as unknown as T;      // PDFs
 }</code></pre>
       <h3>Using it</h3>
 <pre><code>// src/api/auth.ts
-import { api, readXsrfToken } from './client';
+import { api, setAccessToken } from './client';
 export interface Me { id: number; email: string; name: string; displayName: string; role: 'ADMIN' | 'VENDOR' | 'REVIEWER' }
-
-/** App start: 200 = logged in; ApiError 401 = logged out (this call also hands out XSRF-TOKEN). */
-export const getMe = () =&gt; api&lt;Me&gt;('/api/auth/me');
+export interface LoginResponse { accessToken: string; tokenType: 'Bearer'; expiresIn: number; expiresAt: string; user: Me }
 
 export async function login(email: string, password: string): Promise&lt;Me&gt; {
-  if (!readXsrfToken()) {
-    await api('/api/health');            // any anonymous GET sets the XSRF-TOKEN cookie
-  }
-  return api&lt;Me&gt;('/api/auth/login', { method: 'POST', json: { email, password } });
+  const result = await api&lt;LoginResponse&gt;('/api/auth/login', { method: 'POST', json: { email, password } });
+  setAccessToken(result.accessToken);   // memory only
+  return result.user;
 }
-export const logout = () =&gt; api&lt;void&gt;('/api/auth/logout', { method: 'POST' });
+export function logout(): void { setAccessToken(null); }   // no server call needed
+export async function logoutEverywhere(): Promise&lt;void&gt; {
+  await api&lt;void&gt;('/api/auth/logout-all', { method: 'POST' });   // revokes ALL tokens of this user
+  setAccessToken(null);
+}
+export const getMe = () =&gt; api&lt;Me&gt;('/api/auth/me');
 
 // Upload one file (field name "file"); 202 accepted and 422 rejected both carry a FileIntakeResponse
 export function uploadFile(batchId: number, file: File) {
@@ -499,61 +550,58 @@ export function uploadFile(batchId: number, file: File) {
                code: string | null; message: string }&gt;(`/api/batches/${batchId}/files`, { method: 'POST', form });
 }
 // On 422: catch the ApiError and read error.body.code / error.body.message for that file's row.</code></pre>
-      <p>PDF preview: a link or <code>&lt;iframe&gt;</code> with <code>src="/api/invoices/{id}/document"</code> works
-        through the proxy (same origin, cookie sent automatically). Handle 404 as &ldquo;original file no longer
-        available in the demo&rdquo;.</p>
+      <h3 id="pdf-preview">PDF preview</h3>
+      <p>The PDF route needs the token too, so <code>&lt;iframe src="/api/invoices/41/document"&gt;</code> would get a
+        401. Fetch the bytes with the client and show a local object URL:</p>
+<pre><code>const blob = await api&lt;Blob&gt;(`/api/invoices/${id}/document`);
+const url = URL.createObjectURL(blob);     // blob: URL that lives only in this tab
+// &lt;iframe title="Original PDF" src={url} /&gt;  - and URL.revokeObjectURL(url) when the reviewer leaves</code></pre>
+      <p>404 = not yours or the file is missing; show &ldquo;Original PDF not available&rdquo;.</p>
     </section>
 
     <section id="auth" aria-labelledby="auth-h">
-      <h2 id="auth-h">Login, cookies and CSRF &mdash; the exact rules</h2>
+      <h2 id="auth-h">Login and the Bearer token &mdash; the exact rules</h2>
       <div class="table-wrap"><table>
-        <thead><tr><th>Item</th><th>Exact behaviour (from source)</th></tr></thead>
+        <thead><tr><th>Item</th><th>Exact behaviour (from source and tests)</th></tr></thead>
         <tbody>
-          <tr><td>Session cookie</td><td><code>INVOICE_PROCESS_AUTH</code>: <code>HttpOnly; Secure; SameSite=Strict; Path=/</code>, no <code>Domain</code>, 30 minutes. A signed JWT the browser manages; JavaScript can never read it and must not try. Never store it in <code>localStorage</code> or React state.</td></tr>
-          <tr><td>Refresh</td><td>None. After 30 minutes the next request returns 401 &rarr; show login, then return the user to where they were.</td></tr>
-          <tr><td>Role</td><td>Read from the database on every request (not in the token). A role change or disabling takes effect immediately.</td></tr>
-          <tr><td>CSRF cookie</td><td><code>XSRF-TOKEN</code> (readable by JavaScript, <code>Path=/</code>), set on the first response &mdash; also anonymous ones like <code>GET /api/health</code> or a 401 from <code>GET /api/auth/me</code>.</td></tr>
-          <tr><td>CSRF header</td><td>Every <code>POST</code> and <code>PUT</code> (the only unsafe methods this API has), <strong>login included</strong>: <code>X-XSRF-TOKEN: &lt;current cookie value&gt;</code>. Missing or wrong &rarr; 403, checked before authentication.</td></tr>
-          <tr><td>Rotation</td><td>A new token at login and at logout. Read the cookie immediately before each request; never keep it in state.</td></tr>
-          <tr><td>Credentials</td><td><code>credentials: 'same-origin'</code> through the Vite proxy. The browser code never calls the onrender.com URL directly.</td></tr>
-          <tr><td>CORS</td><td>None, on purpose. A page on another origin gets no permission, cannot read <code>XSRF-TOKEN</code>, and the <code>SameSite=Strict</code> cookie is not sent cross-site.</td></tr>
+          <tr><td>Login</td><td><code>POST /api/auth/login {"email","password"}</code> &rarr; 200 <code>{"accessToken","tokenType":"Bearer","expiresIn":1800,"expiresAt":"2026-10-28T10:30:00Z","user":{...}}</code>. No cookie is set.</td></tr>
+          <tr><td>Every other call</td><td>Header <code>Authorization: Bearer &lt;accessToken&gt;</code>. Only <code>GET /api/health</code> and login work without it.</td></tr>
+          <tr><td>Where the token is read</td><td><strong>Only</strong> that header &mdash; never a cookie, a URL parameter or a request body.</td></tr>
+          <tr><td>Storage in React</td><td>Memory only (module variable / context). Not <code>localStorage</code>, not <code>sessionStorage</code>. Never log it, never put it in a URL.</td></tr>
+          <tr><td>Lifetime / refresh</td><td>30 minutes (<code>expiresIn</code>), no refresh token. After that the next call returns 401 &rarr; show login, then return the user to where they were.</td></tr>
+          <tr><td>Role</td><td>Read from the database on every request (not from the token). A role change or disabling takes effect on the next request.</td></tr>
+          <tr><td>Logout</td><td>Forget the token in memory. &ldquo;Log out everywhere&rdquo; = <code>POST /api/auth/logout-all</code> (revokes every token of this user on the server). There is no <code>/api/auth/logout</code> route.</td></tr>
+          <tr><td>CSRF</td><td>Not needed and not used: browsers never attach an <code>Authorization</code> header by themselves, so another website cannot send authenticated requests in the user's name.</td></tr>
+          <tr><td>401 / 403</td><td>401 <code>"Please log in."</code> (with <code>WWW-Authenticate: Bearer</code>) for a missing, malformed, expired, revoked or wrongly signed token or a disabled account; 403 for a valid token with the wrong role.</td></tr>
           <tr><td>Login lock</td><td>5 failed logins per e-mail or per client address &rarr; locked for 15 minutes (429).</td></tr>
         </tbody>
       </table></div>
       <h3>Sequence</h3>
       <ol>
-        <li>App start: <code>GET /api/auth/me</code>. 200 &rarr; logged in, route by <code>role</code>. 401 &rarr; show login (no error banner).</li>
-        <li>Login form: <code>POST /api/auth/login {email, password}</code> with <code>X-XSRF-TOKEN</code>. 200 &rarr; <code>Me</code>. 401 &rarr; one generic &ldquo;wrong e-mail or password&rdquo;. 429 &rarr; show the lock message.</li>
-        <li>While logged in: any 401 &rarr; session ended. Any 403 whose message mentions CSRF &rarr; do one <code>GET /api/auth/me</code> and let the user retry once.</li>
-        <li>Logout: <code>POST /api/auth/logout</code> &rarr; 204; clear all cached data. &ldquo;Log out everywhere&rdquo;: <code>POST /api/auth/logout-all</code>.</li>
+        <li>App start: no token in memory &rarr; show the login page (no error banner).</li>
+        <li>Login form: <code>POST /api/auth/login</code>. 200 &rarr; store <code>accessToken</code> in memory, route by <code>user.role</code>. 401 &rarr; one generic &ldquo;wrong e-mail or password&rdquo;. 429 &rarr; show the lock message.</li>
+        <li>While logged in: any 401 &rarr; the client forgets the token, the session provider shows login (&ldquo;your session ended&rdquo;).</li>
+        <li>Logout: forget the token and clear all cached data (e.g. <code>queryClient.clear()</code>).</li>
       </ol>
-      <div class="callout warn">
-        <p><strong>Postman succeeding does not prove the browser works</strong> (Postman ignores SameSite and origins).
-          The proxy route is designed and its backend side is tested, but it has not yet been exercised in a browser
-          against the deployed demo &mdash; you will be the first to confirm it. Chromium-based browsers accept the
-          <code>Secure</code> cookies on <code>http://localhost</code>; if another browser shows a 200 login followed by
-          401, run the dev server over HTTPS.</p>
-      </div>
     </section>
 
     <section id="admin" aria-labelledby="admin-h">
       <h2 id="admin-h">Admin screens &rarr; API (role ADMIN)</h2>
-      <p>Every Admin screen loads its data from the routes below, through the API client. After any change, reload the
-        list shown (call its GET again). All Admin routes answer 401 without login and 403 for a non-admin. Every
-        <code>POST</code>/<code>PUT</code> needs the CSRF header.</p>
+      <p>Every Admin screen loads its data from the routes below. After any change, reload the list shown (call its GET
+        again). All Admin routes answer 401 without a token and 403 for a non-admin.</p>
 
       <div class="table-wrap"><table>
-        <thead><tr><th>Screen</th><th>On load</th><th>Actions</th><th>Demo</th></tr></thead>
+        <thead><tr><th>Screen</th><th>On load</th><th>Actions</th></tr></thead>
         <tbody>
-          <tr><td><a href="#a-dashboard">Dashboard</a></td><td><code>GET /api/dashboard/admin?days=7</code></td><td>change <code>days</code> (1&ndash;90)</td><td class="yes">Yes (mostly zeros)</td></tr>
-          <tr><td><a href="#a-users">Users</a></td><td><code>GET /api/admin/users</code></td><td>create, role, display name, enable/disable, reviewer categories</td><td class="yes">Yes</td></tr>
-          <tr><td><a href="#a-categories">Categories</a></td><td><code>GET /api/admin/categories</code></td><td>create, activate/deactivate</td><td class="yes">Yes</td></tr>
-          <tr><td><a href="#a-intake">Intake &amp; assignment</a></td><td><code>GET /api/admin/intake</code></td><td>set category, assign / reassign / unassign</td><td class="yes">Yes (all rows waiting for extraction)</td></tr>
-          <tr><td><a href="#a-batches">All batches</a></td><td><code>GET /api/batches</code></td><td>open detail <code>GET /api/batches/{id}</code></td><td class="yes">Yes</td></tr>
-          <tr><td><a href="#a-queue">Queue status</a></td><td><code>GET /api/admin/queue/status</code></td><td>refresh</td><td class="yes">Yes (worker off)</td></tr>
-          <tr><td><a href="#a-approvals">Waiting for approval</a></td><td><code>GET /api/invoices?status=PENDING_APPROVAL</code></td><td>approve, reject, send back; V1-vs-submitted compare</td><td class="no">Contract only</td></tr>
-          <tr><td><a href="#a-failed">Failed extractions</a></td><td><code>GET /api/invoices?status=FAILED</code></td><td>requeue</td><td class="no">Contract only</td></tr>
-          <tr><td><a href="#a-decided">Approved and rejected</a></td><td><code>GET /api/invoices?status=APPROVED</code> / <code>REJECTED</code></td><td>reopen</td><td class="no">Contract only</td></tr>
+          <tr><td><a href="#a-dashboard">Dashboard</a></td><td><code>GET /api/dashboard/admin?days=7</code></td><td>change <code>days</code> (1&ndash;90)</td></tr>
+          <tr><td><a href="#a-users">Users</a></td><td><code>GET /api/admin/users</code></td><td>create, role, display name, enable/disable, reviewer categories</td></tr>
+          <tr><td><a href="#a-categories">Categories</a></td><td><code>GET /api/admin/categories</code></td><td>create, activate/deactivate</td></tr>
+          <tr><td><a href="#a-intake">Intake &amp; assignment</a></td><td><code>GET /api/admin/intake</code></td><td>set category, assign / reassign / unassign</td></tr>
+          <tr><td><a href="#a-batches">All batches</a></td><td><code>GET /api/batches</code></td><td>open detail <code>GET /api/batches/{id}</code></td></tr>
+          <tr><td><a href="#a-queue">Queue status</a></td><td><code>GET /api/admin/queue/status</code></td><td>refresh</td></tr>
+          <tr><td><a href="#a-approvals">Waiting for approval</a></td><td><code>GET /api/invoices?status=PENDING_APPROVAL</code></td><td>approve, reject, send back; V1-vs-submitted compare</td></tr>
+          <tr><td><a href="#a-failed">Failed extractions</a></td><td><code>GET /api/invoices?status=FAILED</code></td><td>requeue</td></tr>
+          <tr><td><a href="#a-decided">Approved and rejected</a></td><td><code>GET /api/invoices?status=APPROVED</code> / <code>REJECTED</code></td><td>reopen</td></tr>
         </tbody>
       </table></div>
 
@@ -573,15 +621,15 @@ export function uploadFile(batchId: number, file: File) {
       <p>Tiles: show <code>statusCounts</code> per status (treat missing as 0), <code>receivedToday</code>, the queue
         block and the reviewer workload table (each row: <code>name</code>, <code>NEEDS_REVIEW</code>,
         <code>PENDING_APPROVAL</code>; the last row is always &ldquo;(not assigned)&rdquo;). Rates come with their
-        <code>definition</code> text &mdash; show it as a tooltip or footnote. In the demo almost everything is 0 because
-        nothing is extracted; design proper empty states.</p>
+        <code>definition</code> text &mdash; show it as a tooltip or footnote. Token numbers are the ones Gemini
+        reported; never estimate your own.</p>
 
       <h3 id="a-users">Users</h3>
       <div class="table-wrap"><table>
         <thead><tr><th>Action</th><th>Route</th><th>Body</th><th>Success</th><th>Errors to handle</th></tr></thead>
         <tbody>
           <tr><td>List</td><td><span class="m GET">GET</span> <code>/api/admin/users</code></td><td>&ndash;</td><td>200 <code>User[]</code></td><td>401, 403</td></tr>
-          <tr><td>Create</td><td><span class="m POST">POST</span> <code>/api/admin/users</code></td><td><code>{email, displayName?, role, password}</code></td><td>201 <code>User</code></td><td>400 <code>fieldErrors</code> (all problems at once; demo: non-<code>@example.test</code>), 409 e-mail exists</td></tr>
+          <tr><td>Create</td><td><span class="m POST">POST</span> <code>/api/admin/users</code></td><td><code>{email, displayName?, role, password}</code></td><td>201 <code>User</code></td><td>400 <code>fieldErrors</code> (all problems at once), 409 e-mail exists</td></tr>
           <tr><td>Change role</td><td><span class="m PUT">PUT</span> <code>/api/admin/users/{id}/role</code></td><td><code>{"role":"REVIEWER"}</code></td><td>200 <code>User</code>; that user must log in again</td><td>404, 409 last enabled admin</td></tr>
           <tr><td>Rename</td><td><span class="m PUT">PUT</span> <code>/api/admin/users/{id}/display-name</code></td><td><code>{"displayName":"Sam"}</code></td><td>200 <code>User</code></td><td>400 (&gt; 100 chars), 404</td></tr>
           <tr><td>Enable / disable</td><td><span class="m PUT">PUT</span> <code>/api/admin/users/{id}/enabled</code></td><td><code>{"enabled":false}</code></td><td>200 <code>User</code>; disabled user gets 401 next</td><td>400, 404, 409 last enabled admin</td></tr>
@@ -590,7 +638,7 @@ export function uploadFile(batchId: number, file: File) {
         </tbody>
       </table></div>
 <pre><code>// User (UserResponse) - never contains a password or hash
-{ "id": 7, "email": "akash.reviewer@example.test", "name": "Akash", "displayName": "Akash",
+{ "id": 7, "email": "reviewer.one@example.test", "name": "Reviewer One", "displayName": "Reviewer One",
   "role": "REVIEWER", "enabled": true, "createdAt": "2026-10-27T10:00:00", "updatedAt": "2026-10-27T10:00:00" }</code></pre>
       <p>Show <code>name</code> (= <code>displayName</code>, or the part of the e-mail before &ldquo;@&rdquo; when no
         display name is set). Passwords: 12&ndash;72 <em>bytes</em> (not characters; &ldquo;&eacute;&rdquo; is 2 bytes).
@@ -616,8 +664,8 @@ export function uploadFile(batchId: number, file: File) {
 <pre><code>{ "worker": { "enabled": false, "running": false, "idleReason": "...", "onlyInvoiceIds": [], "onlyInvoiceIdsProblems": [] },
   "counts": { "needsAssignment": 1, "needsAssignmentWaitingForExtraction": 1,
               "assigned": 0, "assignedWaitingForExtraction": 0, "assignedReadyForReview": 0 },
-  "needsAssignment": [ { "invoiceId": 41, "fileName": "synthetic-demo-invoice-01.pdf", "batchId": 12,
-      "vendorName": "Omkar", "categoryCode": "IT", "status": "QUEUED", "stage": "WAITING_FOR_EXTRACTION",
+  "needsAssignment": [ { "invoiceId": 41, "fileName": "synthetic-sample-invoice-01.pdf", "batchId": 12,
+      "vendorName": "Vendor One", "categoryCode": "IT", "status": "QUEUED", "stage": "WAITING_FOR_EXTRACTION",
       "uploadedAt": "2026-10-27T10:20:00", "assignedReviewerId": null, "assignedReviewerName": null,
       "extractionAttempts": 0, "blockedReason": "..." } ],
   "assigned": [],
@@ -632,18 +680,16 @@ export function uploadFile(batchId: number, file: File) {
         </tbody>
       </table></div>
 <pre><code>// AssignmentResult
-{ "invoiceId": 41, "assigned": true, "message": "Assigned.", "status": "QUEUED", "reviewerId": 7, "reviewerName": "Akash" }</code></pre>
+{ "invoiceId": 41, "assigned": true, "message": "Assigned.", "status": "QUEUED", "reviewerId": 7, "reviewerName": "Reviewer One" }</code></pre>
       <p>Show <code>stage</code> as a label (<code>WAITING_FOR_EXTRACTION</code>, <code>EXTRACTING</code>,
         <code>READY_FOR_REVIEW</code>) and <code>blockedReason</code> / <code>worker.idleReason</code> as information,
-        not as an error. After an action, re-fetch the board. In the demo every row stays
-        <code>WAITING_FOR_EXTRACTION</code>; assigning still works and makes the invoice visible in that reviewer's
-        list.</p>
+        not as an error. After an action, re-fetch the board.</p>
 
       <h3 id="a-batches">All batches</h3>
       <p><span class="m GET">GET</span> <code>/api/batches</code> &rarr; <code>BatchSummary[]</code> of all vendors,
         newest first; <span class="m GET">GET</span> <code>/api/batches/{id}</code> &rarr; <code>BatchDetail</code>
         (<code>batch</code>, <code>statusCounts</code>, <code>invoices[]</code>, <code>rejections[]</code>). Same shapes
-        as the vendor screens (<a href="#vendor">below</a>). Admins may also create batches and upload, like vendors.</p>
+        as the vendor screens (<a href="#vendor">below</a>).</p>
 
       <h3 id="a-queue">Queue status</h3>
 <pre><code>// GET /api/admin/queue/status
@@ -652,143 +698,142 @@ export function uploadFile(batchId: number, file: File) {
   "rpmLimit": null, "tpmLimit": null, "rpdLimit": null, "safetyMargin": 0.8, "requestsLastMinute": 0,
   "inputTokensLastMinute": 0, "requestsSinceDailyReset": 0, "pausedUntil": null, "nextDailyReset": "...",
   "estimatedInputTokensPerCall": 0 } }</code></pre>
-      <p><code>geminiKeyConfigured</code> is presence only &mdash; the key itself is never returned. In the demo the
-        worker is off by design; show <code>idleReason</code> as an informational message.</p>
+      <p><code>geminiKeyConfigured</code> is presence only &mdash; the key itself is never returned. The limits are the
+        ones the owner configured for the project and model; <code>estimatedInputTokensPerCall</code> is an estimate
+        used for pacing, not a measured value. Show <code>idleReason</code> as an informational message (e.g. worker
+        off, no key, limits missing, paid project not confirmed, daily quota pause).</p>
 
-      <h3 id="a-approvals">Waiting for approval <span class="demo-flag">CONTRACT ONLY IN DEMO</span></h3>
+      <h3 id="a-approvals">Waiting for approval</h3>
       <ul>
         <li>List: <code>GET /api/invoices?status=PENDING_APPROVAL</code> &rarr; <code>InvoiceSummary[]</code>.</li>
-        <li>Detail: <code>GET /api/invoices/{id}</code>; changes since extraction:
-          <code>GET /api/invoices/{id}/versions/compare?from=1&amp;to={submittedVersion}</code>.</li>
+        <li>Detail: <code>GET /api/invoices/{id}</code>; all versions: <code>GET /api/invoices/{id}/versions</code>;
+          changes since extraction: <code>GET /api/invoices/{id}/versions/compare?from=1&amp;to={submittedVersion}</code>.</li>
         <li>Approve: <code>POST /api/invoices/{id}/approve {"version": submittedVersion, "reason": "optional"}</code>.
           Reject: <code>POST /api/invoices/{id}/reject {"version": n, "reason": "required"}</code>. Send back:
           <code>POST /api/invoices/{id}/send-back {"reason": "required"}</code>.</li>
         <li>409 when <code>version</code> is not both the submitted and the current version &mdash; reload, never resend.</li>
       </ul>
-      <h3 id="a-failed">Failed extractions <span class="demo-flag">CONTRACT ONLY IN DEMO</span></h3>
+      <h3 id="a-failed">Failed extractions</h3>
       <p><code>GET /api/invoices?status=FAILED</code>; show <code>failureReason</code> from the detail. Requeue:
         <code>POST /api/invoices/{id}/requeue {"reason": "required"}</code> (only a <code>FAILED</code> batch invoice; else 409).</p>
-      <h3 id="a-decided">Approved and rejected <span class="demo-flag">CONTRACT ONLY IN DEMO</span></h3>
+      <h3 id="a-decided">Approved and rejected</h3>
       <p><code>GET /api/invoices?status=APPROVED</code> and <code>?status=REJECTED</code>. Reopen:
         <code>POST /api/invoices/{id}/reopen {"reason": "required"}</code> (back to <code>NEEDS_REVIEW</code>).
-        Legacy single-file invoices (admin only): <code>GET /api/invoices?legacy=true</code> &mdash; the fresh demo
-        database has none.</p>
-      <div class="callout warn">
-        <p>For the three contract-only screens: build the list, detail and dialogs, but in the demo show
-          &ldquo;Not available in this demo &mdash; extraction is disabled&rdquo; instead of action buttons. Never show
-          mock data as if it came from the API.</p>
-      </div>
+        Legacy single-file invoices (admin only): <code>GET /api/invoices?legacy=true</code>.</p>
     </section>
 
     <section id="vendor" aria-labelledby="vendor-h">
       <h2 id="vendor-h">Vendor screens &rarr; API (role VENDOR)</h2>
       <div class="table-wrap"><table>
-        <thead><tr><th>Screen</th><th>Calls</th><th>Reads</th><th>Demo</th></tr></thead>
+        <thead><tr><th>Screen</th><th>Calls</th><th>Reads</th></tr></thead>
         <tbody>
-          <tr><td>This week</td><td><code>GET /api/dashboard/vendor?days=7</code></td><td><code>statusCounts</code>, <code>receivedToday</code>, <code>receivedInPeriod</code>, <code>batches</code>, <code>recentFailures[]</code>, <code>geminiUsage</code></td><td class="yes">Yes</td></tr>
-          <tr><td>New batch</td><td><code>GET /api/categories</code>, <code>GET /api/cloud-sources</code>, then on click <code>POST /api/batches {label?, defaultCategoryCode?, source?}</code> &rarr; 201</td><td><code>BatchSummary.id</code></td><td class="yes">Yes (source <code>LOCAL</code>)</td></tr>
-          <tr><td>Upload files</td><td><code>POST /api/batches/{id}/files</code>, multipart field <code>file</code> (+ <code>relativePath</code> for folders), <strong>one file per request</strong>, in order</td><td>202 / 422 <code>FileIntakeResponse</code> per row</td><td class="part">Fixtures only</td></tr>
-          <tr><td>Close batch</td><td><code>POST /api/batches/{id}/close</code></td><td><code>status: CLOSED</code></td><td class="yes">Yes</td></tr>
-          <tr><td>My batches</td><td><code>GET /api/batches</code></td><td><code>BatchSummary[]</code></td><td class="yes">Yes</td></tr>
-          <tr><td>Batch detail</td><td><code>GET /api/batches/{id}</code> (poll ~10 s while any invoice is <code>QUEUED</code>/<code>PROCESSING</code>; stop when the tab is hidden)</td><td><code>batch</code>, <code>statusCounts</code>, <code>invoices[]</code>, <code>rejections[]</code></td><td class="yes">Yes</td></tr>
-          <tr><td>Invoice detail</td><td><code>GET /api/invoices/{id}</code>, <code>/events</code>, <code>/document</code></td><td><code>Invoice</code>, events, PDF</td><td class="yes">Yes (data empty until extraction)</td></tr>
+          <tr><td>This week</td><td><code>GET /api/dashboard/vendor?days=7</code></td><td><code>statusCounts</code>, <code>receivedToday</code>, <code>receivedInPeriod</code>, <code>batches</code>, <code>recentFailures[]</code>, <code>geminiUsage</code></td></tr>
+          <tr><td>New batch</td><td><code>GET /api/categories</code>, <code>GET /api/cloud-sources</code>, then on click <code>POST /api/batches {label?, defaultCategoryCode?, source?}</code> &rarr; 201</td><td><code>BatchSummary.id</code></td></tr>
+          <tr><td>Upload files</td><td><code>POST /api/batches/{id}/files</code>, multipart field <code>file</code> (+ <code>relativePath</code> for folders), <strong>one file per request</strong>, in order</td><td>202 / 422 <code>FileIntakeResponse</code> per row</td></tr>
+          <tr><td>Close batch</td><td><code>POST /api/batches/{id}/close</code></td><td><code>status: CLOSED</code></td></tr>
+          <tr><td>My batches</td><td><code>GET /api/batches</code></td><td><code>BatchSummary[]</code></td></tr>
+          <tr><td>Batch detail</td><td><code>GET /api/batches/{id}</code> (poll ~10 s while any invoice is <code>QUEUED</code>/<code>PROCESSING</code>; stop when the tab is hidden)</td><td><code>batch</code>, <code>statusCounts</code>, <code>invoices[]</code>, <code>rejections[]</code></td></tr>
+          <tr><td>Invoice detail</td><td><code>GET /api/invoices/{id}</code>, <code>/events</code>, <code>/document</code></td><td><code>Invoice</code>, events, PDF</td></tr>
         </tbody>
       </table></div>
 <pre><code>// BatchSummary
 { "id": 12, "label": "October", "source": "LOCAL", "status": "OPEN", "defaultCategoryCode": "IT", "ownerUserId": 3,
   "acceptedCount": 1, "rejectedCount": 1, "createdAt": "2026-10-27T10:00:00", "closedAt": null }
 // FileIntakeResponse (202 accepted / 422 rejected)
-{ "fileName": "synthetic-demo-invoice-01.pdf", "accepted": true, "invoiceId": 41, "status": "QUEUED", "code": null,
+{ "fileName": "INV-2026-118.pdf", "accepted": true, "invoiceId": 41, "status": "QUEUED", "code": null,
   "message": "Accepted and queued for extraction." }</code></pre>
-      <p>422 codes: <code>INVALID_FILE</code>, <code>DUPLICATE_FILE</code>, <code>NESTED_FOLDER</code>,
-        <code>SOURCE_MISMATCH</code>; demo only: <code>NOT_A_DEMO_FIXTURE</code> (checked first; then the
-        <code>fileName</code> is the neutral <code>file-not-accepted-by-demo.pdf</code>, so match result rows by request
-        order). Max 100 accepted files per batch. Retrying a file whose request got no response is safe.</p>
+      <p><strong>Any valid invoice PDF</strong> is accepted: non-empty, at most 10 MB, ends in <code>.pdf</code>, and
+        really opens as a PDF. 422 codes: <code>INVALID_FILE</code> (too large, not a PDF, damaged, password-protected
+        &mdash; show <code>message</code>), <code>DUPLICATE_FILE</code> (this vendor already uploaded these exact bytes),
+        <code>NESTED_FOLDER</code>, <code>SOURCE_MISMATCH</code>. A whole request over 11 MB is refused with 400. Max
+        100 accepted files per batch (then 409). Retrying a file whose request got no response is safe. Show
+        &ldquo;Accepted and queued&rdquo; &mdash; never &ldquo;extracted&rdquo; &mdash; until the status changes.</p>
     </section>
 
     <section id="reviewer" aria-labelledby="reviewer-h">
       <h2 id="reviewer-h">Reviewer screens &rarr; API (role REVIEWER)</h2>
       <div class="table-wrap"><table>
-        <thead><tr><th>Screen</th><th>Calls</th><th>Reads</th><th>Demo</th></tr></thead>
+        <thead><tr><th>Screen</th><th>Calls</th><th>Reads</th></tr></thead>
         <tbody>
-          <tr><td>Today</td><td><code>GET /api/dashboard/reviewer?days=7</code></td><td><code>assignedStatusCounts</code>, <code>oldestWaitingSince</code>, <code>submittedInPeriod</code>, <code>correctionsSavedInPeriod</code>, <code>myCorrectionRate</code></td><td class="yes">Yes (zeros)</td></tr>
-          <tr><td>Assigned to me</td><td><code>GET /api/invoices?status=NEEDS_REVIEW&amp;size=200</code> (a reviewer only ever sees invoices assigned to them)</td><td><code>InvoiceSummary[]</code></td><td class="part">Empty; assigned demo invoices appear with <code>?status=QUEUED</code></td></tr>
-          <tr><td>Invoice review: read</td><td><code>GET /api/invoices/{id}</code>, <code>/checks</code>, <code>/review-reasons</code>, <code>/versions</code>, <code>/versions/{n}</code>, <code>/document</code></td><td>data, warnings, history, PDF</td><td class="part">Read-only on queued invoices</td></tr>
-          <tr><td>Invoice review: save</td><td><code>PUT /api/invoices/{id}</code> &mdash; the <strong>complete</strong> invoice with <code>baseVersion</code> = <code>currentVersion</code></td><td><code>{changed, invoice}</code>; 409 stale version, 422 check failed</td><td class="no">Contract only (needs <code>NEEDS_REVIEW</code>)</td></tr>
-          <tr><td>Submit</td><td><code>POST /api/invoices/{id}/submit {"version": currentVersion}</code></td><td><code>PENDING_APPROVAL</code></td><td class="no">Contract only</td></tr>
+          <tr><td>Today</td><td><code>GET /api/dashboard/reviewer?days=1</code></td><td><code>assignedStatusCounts</code>, <code>oldestWaitingSince</code>, <code>submittedInPeriod</code>, <code>correctionsSavedInPeriod</code>, <code>myCorrectionRate</code></td></tr>
+          <tr><td>Assigned to me</td><td><code>GET /api/invoices?status=NEEDS_REVIEW&amp;size=200</code> (a reviewer only ever sees invoices assigned to them); history: other statuses</td><td><code>InvoiceSummary[]</code></td></tr>
+          <tr><td>Invoice review: read</td><td><code>GET /api/invoices/{id}</code>, <code>/checks</code>, <code>/review-reasons</code>, <code>/versions</code>, <code>/versions/{n}</code>, <code>/document</code></td><td>data, warnings, history, PDF</td></tr>
+          <tr><td>Invoice review: save</td><td><code>PUT /api/invoices/{id}</code> &mdash; the <strong>complete</strong> invoice with <code>baseVersion</code> = <code>currentVersion</code></td><td><code>{changed, invoice}</code>; 409 stale version, 422 check failed</td></tr>
+          <tr><td>Submit</td><td><code>POST /api/invoices/{id}/submit {"version": currentVersion}</code></td><td><code>PENDING_APPROVAL</code></td></tr>
         </tbody>
       </table></div>
-      <p>The full <code>InvoiceUpdate</code> body, item rules and every response shape are in
+      <p>Every save creates a new version; older versions and the original PDF never change. The full
+        <code>InvoiceUpdate</code> body, item rules and every response shape are in
         <a href="REACT_BACKEND_HANDOFF.md">REACT_BACKEND_HANDOFF.md</a> sections 3.4 and 4. Send money and quantities as
         <strong>strings</strong> (<code>"12390.00"</code>); never do money maths with JavaScript floats.</p>
     </section>
 
     <section id="routes" aria-labelledby="routes-h">
-      <h2 id="routes-h">All 47 routes</h2>
-      <p>Verified against the Spring controllers: 47 routes in source = 47 operations in <code>openapi.yaml</code>
-        (24 GET, 16 POST, 7 PUT; no DELETE or PATCH). &ldquo;CSRF&rdquo; = needs <code>X-XSRF-TOKEN</code>.
-        &ldquo;Login&rdquo; = any logged-in role (what each role sees is still scoped).</p>
+      <h2 id="routes-h">All 46 routes</h2>
+      <p>Verified against the Spring controllers: 46 routes in source = 46 operations in <code>openapi.yaml</code>
+        (24 GET, 15 POST, 7 PUT; no DELETE or PATCH). Every route except health and login needs
+        <code>Authorization: Bearer</code>. &ldquo;Writes&rdquo; = changes data. &ldquo;Login&rdquo; = any logged-in
+        role (what each role sees is still scoped).</p>
       <div class="search">
         <label for="route-filter"><strong>Filter routes</strong></label>
-        <input id="route-filter" type="search" placeholder="e.g. admin, POST, invoices, demo" autocomplete="off">
+        <input id="route-filter" type="search" placeholder="e.g. admin, POST, invoices" autocomplete="off">
         <span id="route-count" class="muted" aria-live="polite"></span>
       </div>
       <div class="table-wrap"><table id="route-table">
-        <thead><tr><th>Method</th><th>Path</th><th>Who</th><th>CSRF</th><th>Purpose</th><th>Demo</th></tr></thead>
+        <thead><tr><th>Method</th><th>Path</th><th>Who</th><th>Writes</th><th>Purpose</th></tr></thead>
         <tbody>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/health</code></td><td>public</td><td>&ndash;</td><td>Liveness <code>{"status":"UP"}</code></td><td class="yes">yes</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/auth/login</code></td><td>public</td><td>yes</td><td>Log in &rarr; <code>Me</code> + cookie</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/auth/logout</code></td><td>public</td><td>yes</td><td>Log out &rarr; 204</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/auth/logout-all</code></td><td>login</td><td>yes</td><td>End all my sessions &rarr; 204</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/auth/me</code></td><td>login</td><td>&ndash;</td><td>Who am I &rarr; <code>Me</code></td><td class="yes">yes</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/batches</code></td><td>VENDOR, ADMIN</td><td>yes</td><td>Create batch</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/batches</code></td><td>VENDOR, ADMIN</td><td>&ndash;</td><td>List batches (vendor: own)</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/batches/{id}</code></td><td>VENDOR, ADMIN</td><td>&ndash;</td><td>Batch detail</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/batches/{id}/files</code></td><td>VENDOR, ADMIN</td><td>yes</td><td>Upload one PDF (multipart <code>file</code>)</td><td class="part">fixtures only</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/batches/{id}/close</code></td><td>VENDOR, ADMIN</td><td>yes</td><td>Close batch</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/cloud-sources</code></td><td>VENDOR, ADMIN</td><td>&ndash;</td><td>Cloud picker config</td><td class="yes">NOT_CONFIGURED</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices</code></td><td>login</td><td>&ndash;</td><td>List (filters: <code>status category batchId unassigned legacy page size</code>)</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}</code></td><td>login</td><td>&ndash;</td><td>Invoice detail</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}/review-reasons</code></td><td>login</td><td>&ndash;</td><td>Reasons stored at extraction</td><td class="part">empty</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}/checks</code></td><td>login</td><td>&ndash;</td><td>Checks on current data</td><td class="part">runs on unextracted data</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}/events</code></td><td>login</td><td>&ndash;</td><td>Audit events</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}/versions</code></td><td>login</td><td>&ndash;</td><td>Version list</td><td class="part">empty</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}/versions/{n}</code></td><td>login</td><td>&ndash;</td><td>One version with snapshot</td><td class="no">none exist</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}/versions/compare</code></td><td>login</td><td>&ndash;</td><td>Diff <code>from</code> / <code>to</code></td><td class="no">none exist</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}/document</code></td><td>login</td><td>&ndash;</td><td>Original PDF</td><td class="part">until restart</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/documents/{documentId}</code></td><td>login</td><td>&ndash;</td><td>PDF by document UUID</td><td class="part">until restart</td></tr>
-          <tr><td><span class="m PUT">PUT</span></td><td><code>/api/invoices/{id}</code></td><td>REVIEWER (assigned), ADMIN (legacy only)</td><td>yes</td><td>Save correction</td><td class="no">contract only</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/invoices/{id}/submit</code></td><td>REVIEWER</td><td>yes</td><td>Submit for approval</td><td class="no">contract only</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/admin/users</code></td><td>ADMIN</td><td>&ndash;</td><td>List users</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/admin/users</code></td><td>ADMIN</td><td>yes</td><td>Create user</td><td class="yes">@example.test only</td></tr>
-          <tr><td><span class="m PUT">PUT</span></td><td><code>/api/admin/users/{id}/role</code></td><td>ADMIN</td><td>yes</td><td>Change role</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m PUT">PUT</span></td><td><code>/api/admin/users/{id}/display-name</code></td><td>ADMIN</td><td>yes</td><td>Rename</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m PUT">PUT</span></td><td><code>/api/admin/users/{id}/enabled</code></td><td>ADMIN</td><td>yes</td><td>Enable / disable</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/admin/users/{id}/categories</code></td><td>ADMIN</td><td>&ndash;</td><td>Reviewer's categories</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m PUT">PUT</span></td><td><code>/api/admin/users/{id}/categories</code></td><td>ADMIN</td><td>yes</td><td>Set reviewer's categories</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/categories</code></td><td>login</td><td>&ndash;</td><td>Active categories</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/admin/categories</code></td><td>ADMIN</td><td>&ndash;</td><td>All categories</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/admin/categories</code></td><td>ADMIN</td><td>yes</td><td>Create category</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m PUT">PUT</span></td><td><code>/api/admin/categories/{code}/active</code></td><td>ADMIN</td><td>yes</td><td>Activate / deactivate</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m PUT">PUT</span></td><td><code>/api/admin/invoices/{id}/category</code></td><td>ADMIN</td><td>yes</td><td>Set invoice category</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/admin/intake</code></td><td>ADMIN</td><td>&ndash;</td><td>Intake board</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/admin/assignments</code></td><td>ADMIN</td><td>yes</td><td>Assign / reassign / unassign</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/invoices/{id}/approve</code></td><td>ADMIN</td><td>yes</td><td>Approve submitted version</td><td class="no">contract only</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/invoices/{id}/reject</code></td><td>ADMIN</td><td>yes</td><td>Reject (reason required)</td><td class="no">contract only</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/invoices/{id}/send-back</code></td><td>ADMIN</td><td>yes</td><td>Back to reviewer</td><td class="no">contract only</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/invoices/{id}/reopen</code></td><td>ADMIN</td><td>yes</td><td>Reopen decided invoice</td><td class="no">contract only</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/invoices/{id}/requeue</code></td><td>ADMIN</td><td>yes</td><td>Retry failed extraction</td><td class="no">contract only</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/admin/queue/status</code></td><td>ADMIN</td><td>&ndash;</td><td>Worker and quota status</td><td class="yes">yes (off)</td></tr>
-          <tr><td><span class="m POST">POST</span></td><td><code>/api/invoices/extract</code></td><td>ADMIN</td><td>yes</td><td>Legacy single-file extraction</td><td class="no">409 switched off</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/dashboard/vendor</code></td><td>VENDOR</td><td>&ndash;</td><td>Vendor dashboard (<code>days</code>)</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/dashboard/reviewer</code></td><td>REVIEWER</td><td>&ndash;</td><td>Reviewer dashboard (<code>days</code>)</td><td class="yes">yes</td></tr>
-          <tr><td><span class="m GET">GET</span></td><td><code>/api/dashboard/admin</code></td><td>ADMIN</td><td>&ndash;</td><td>Admin dashboard (<code>days</code>)</td><td class="yes">yes</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/health</code></td><td>public</td><td>&ndash;</td><td>Liveness <code>{"status":"UP"}</code></td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/auth/login</code></td><td>public</td><td>&ndash;</td><td>Log in &rarr; <code>accessToken</code> + <code>user</code></td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/auth/logout-all</code></td><td>login</td><td>yes</td><td>Revoke all my tokens &rarr; 204</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/auth/me</code></td><td>login</td><td>&ndash;</td><td>Who am I &rarr; <code>Me</code></td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/batches</code></td><td>VENDOR, ADMIN</td><td>yes</td><td>Create batch</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/batches</code></td><td>VENDOR, ADMIN</td><td>&ndash;</td><td>List batches (vendor: own)</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/batches/{id}</code></td><td>VENDOR, ADMIN</td><td>&ndash;</td><td>Batch detail</td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/batches/{id}/files</code></td><td>VENDOR, ADMIN (batch owner)</td><td>yes</td><td>Upload one PDF (multipart <code>file</code>)</td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/batches/{id}/close</code></td><td>VENDOR, ADMIN (batch owner)</td><td>yes</td><td>Close batch</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/cloud-sources</code></td><td>VENDOR, ADMIN</td><td>&ndash;</td><td>Cloud picker config</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices</code></td><td>login</td><td>&ndash;</td><td>List (filters: <code>status category batchId unassigned legacy page size</code>)</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}</code></td><td>login</td><td>&ndash;</td><td>Invoice detail</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}/review-reasons</code></td><td>login</td><td>&ndash;</td><td>Reasons stored at extraction</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}/checks</code></td><td>login</td><td>&ndash;</td><td>Checks on current data</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}/events</code></td><td>login</td><td>&ndash;</td><td>Audit events</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}/versions</code></td><td>login</td><td>&ndash;</td><td>Version list</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}/versions/{n}</code></td><td>login</td><td>&ndash;</td><td>One version with snapshot</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}/versions/compare</code></td><td>login</td><td>&ndash;</td><td>Diff <code>from</code> / <code>to</code></td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/invoices/{id}/document</code></td><td>login</td><td>&ndash;</td><td>Original PDF (fetch as blob)</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/documents/{documentId}</code></td><td>login</td><td>&ndash;</td><td>PDF by document UUID</td></tr>
+          <tr><td><span class="m PUT">PUT</span></td><td><code>/api/invoices/{id}</code></td><td>REVIEWER (assigned), ADMIN (legacy only)</td><td>yes</td><td>Save correction (new version)</td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/invoices/{id}/submit</code></td><td>REVIEWER</td><td>yes</td><td>Submit for approval</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/admin/users</code></td><td>ADMIN</td><td>&ndash;</td><td>List users</td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/admin/users</code></td><td>ADMIN</td><td>yes</td><td>Create user</td></tr>
+          <tr><td><span class="m PUT">PUT</span></td><td><code>/api/admin/users/{id}/role</code></td><td>ADMIN</td><td>yes</td><td>Change role</td></tr>
+          <tr><td><span class="m PUT">PUT</span></td><td><code>/api/admin/users/{id}/display-name</code></td><td>ADMIN</td><td>yes</td><td>Rename</td></tr>
+          <tr><td><span class="m PUT">PUT</span></td><td><code>/api/admin/users/{id}/enabled</code></td><td>ADMIN</td><td>yes</td><td>Enable / disable</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/admin/users/{id}/categories</code></td><td>ADMIN</td><td>&ndash;</td><td>Reviewer's categories</td></tr>
+          <tr><td><span class="m PUT">PUT</span></td><td><code>/api/admin/users/{id}/categories</code></td><td>ADMIN</td><td>yes</td><td>Set reviewer's categories</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/categories</code></td><td>login</td><td>&ndash;</td><td>Active categories</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/admin/categories</code></td><td>ADMIN</td><td>&ndash;</td><td>All categories</td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/admin/categories</code></td><td>ADMIN</td><td>yes</td><td>Create category</td></tr>
+          <tr><td><span class="m PUT">PUT</span></td><td><code>/api/admin/categories/{code}/active</code></td><td>ADMIN</td><td>yes</td><td>Activate / deactivate</td></tr>
+          <tr><td><span class="m PUT">PUT</span></td><td><code>/api/admin/invoices/{id}/category</code></td><td>ADMIN</td><td>yes</td><td>Set invoice category</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/admin/intake</code></td><td>ADMIN</td><td>&ndash;</td><td>Intake board</td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/admin/assignments</code></td><td>ADMIN</td><td>yes</td><td>Assign / reassign / unassign</td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/invoices/{id}/approve</code></td><td>ADMIN</td><td>yes</td><td>Approve submitted version</td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/invoices/{id}/reject</code></td><td>ADMIN</td><td>yes</td><td>Reject (reason required)</td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/invoices/{id}/send-back</code></td><td>ADMIN</td><td>yes</td><td>Back to reviewer</td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/invoices/{id}/reopen</code></td><td>ADMIN</td><td>yes</td><td>Reopen decided invoice</td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/invoices/{id}/requeue</code></td><td>ADMIN</td><td>yes</td><td>Retry failed extraction</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/admin/queue/status</code></td><td>ADMIN</td><td>&ndash;</td><td>Worker and quota status</td></tr>
+          <tr><td><span class="m POST">POST</span></td><td><code>/api/invoices/extract</code></td><td>ADMIN</td><td>yes</td><td>Legacy single-file extraction (usually switched off &rarr; 409)</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/dashboard/vendor</code></td><td>VENDOR</td><td>&ndash;</td><td>Vendor dashboard (<code>days</code>)</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/dashboard/reviewer</code></td><td>REVIEWER</td><td>&ndash;</td><td>Reviewer dashboard (<code>days</code>)</td></tr>
+          <tr><td><span class="m GET">GET</span></td><td><code>/api/dashboard/admin</code></td><td>ADMIN</td><td>&ndash;</td><td>Admin dashboard (<code>days</code>)</td></tr>
         </tbody>
       </table></div>
       <p class="muted">The Postman collection (<a href="../postman/Invoice-Process.postman_collection.json">postman/</a>)
-        has 38 requests touching about 21 of these routes and has not been run against the live demo. Import it together
-        with <a href="../postman/Invoice-Process-Render-Free-Demo.postman_environment.json">the demo environment</a>
-        (base URL set, credentials empty &mdash; type them yourself). <code>openapi.yaml</code> is the complete contract.</p>
+        logs in, stores the token in a collection variable at run time and sends it as a Bearer header; it covers part
+        of these routes and has not been run against a deployed service. <code>openapi.yaml</code> is the complete
+        contract.</p>
     </section>
 
     <section id="errors" aria-labelledby="errors-h">
@@ -800,19 +845,19 @@ export function uploadFile(batchId: number, file: File) {
       <div class="table-wrap"><table>
         <thead><tr><th>Status</th><th>Means here</th><th>UI reaction</th></tr></thead>
         <tbody>
-          <tr><td>400</td><td>Invalid request / field validation (<code>fieldErrors</code>)</td><td>Show each message next to its field; do not resend unchanged</td></tr>
-          <tr><td>401</td><td>No, expired or invalid session &mdash; on the login form: wrong e-mail or password</td><td>Go to login (keep the user's place); on the login form show the message</td></tr>
-          <tr><td>403</td><td>Wrong role, <strong>or</strong> missing/invalid CSRF token</td><td>Read <code>message</code>: CSRF &rarr; one <code>GET /api/auth/me</code>, then allow one retry; otherwise &ldquo;not allowed&rdquo;</td></tr>
+          <tr><td>400</td><td>Invalid request / field validation (<code>fieldErrors</code>); upload request over 11 MB</td><td>Show each message next to its field; do not resend unchanged</td></tr>
+          <tr><td>401</td><td>No, expired, revoked or invalid token, or disabled account &mdash; on the login form: wrong e-mail or password</td><td>Forget the token, go to login (keep the user's place); on the login form show the message</td></tr>
+          <tr><td>403</td><td>Valid token, wrong role</td><td>&ldquo;Not allowed&rdquo; &mdash; do not retry</td></tr>
           <tr><td>404</td><td>Not found <strong>or not yours</strong> (same answer on purpose)</td><td>&ldquo;Not found&rdquo; &mdash; never hint that it exists</td></tr>
-          <tr><td>409</td><td>State or version conflict, duplicate, closed batch, last admin, switched-off endpoint</td><td>Reload the object, show the message; never auto-resend</td></tr>
+          <tr><td>409</td><td>State or version conflict, duplicate e-mail, closed/full batch, last admin, switched-off endpoint</td><td>Reload the object, show the message; never auto-resend</td></tr>
           <tr><td>415</td><td>Wrong <code>Content-Type</code></td><td>Developer error &mdash; fix the request</td></tr>
-          <tr><td>422</td><td>Content rejected by a rule (upload code, submit check)</td><td>Show <code>code</code> / <code>message</code> / <code>fieldErrors</code></td></tr>
+          <tr><td>422</td><td>Content rejected by a rule (upload <code>code</code>, submit check)</td><td>Show <code>code</code> / <code>message</code> / <code>fieldErrors</code></td></tr>
           <tr><td>429</td><td>Login locked for 15 minutes</td><td>Show the message; do not retry automatically</td></tr>
-          <tr><td>500</td><td>Unexpected server error (also a stored PDF failing its integrity check)</td><td>&ldquo;Something went wrong (reference <code>errorId</code>)&rdquo; &mdash; never a stack trace</td></tr>
+          <tr><td>500</td><td>Server or storage error: database unavailable, a stored PDF failing its integrity check, or the PDF bucket unreachable during an upload (the file was <strong>not</strong> accepted)</td><td>&ldquo;Something went wrong (reference <code>errorId</code>)&rdquo; &mdash; never a stack trace</td></tr>
         </tbody>
       </table></div>
       <p class="muted">Not every route returns every status; the per-route lists are in
-        <a href="REACT_BACKEND_HANDOFF.md">REACT_BACKEND_HANDOFF.md</a>. 502 exists only on the switched-off legacy extraction route.</p>
+        <a href="REACT_BACKEND_HANDOFF.md">REACT_BACKEND_HANDOFF.md</a>. 502 exists only on the legacy extraction route.</p>
       <h3>States every screen needs</h3>
       <ul>
         <li><strong>Loading:</strong> skeleton or spinner with an accessible label; up to a minute after idle (cold start) &mdash; say so.</li>
@@ -825,14 +870,15 @@ export function uploadFile(batchId: number, file: File) {
       <div class="table-wrap"><table>
         <thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr></thead>
         <tbody>
-          <tr><td>Login returns 403</td><td>No <code>X-XSRF-TOKEN</code> header (login needs it too)</td><td>Call <code>GET /api/auth/me</code> or <code>/api/health</code> first; use the API client</td></tr>
-          <tr><td>Login 200, then <code>/api/auth/me</code> 401</td><td>Browser dropped the <code>Secure</code> cookie on <code>http://localhost</code>, or code calls the onrender.com URL directly</td><td>Use relative <code>/api/...</code> paths; use a Chromium browser or an HTTPS dev server</td></tr>
-          <tr><td>CORS error in the console</td><td>Browser code calls the API host directly</td><td>Keep <code>VITE_API_BASE_URL</code> empty and use the proxy</td></tr>
-          <tr><td>Random 403 after login/logout</td><td>CSRF token cached in state</td><td>Read the cookie at send time (<code>readXsrfToken()</code>)</td></tr>
-          <tr><td>Upload 422 <code>NOT_A_DEMO_FIXTURE</code></td><td>Not one of the six fixture files</td><td>Use only the fixtures</td></tr>
-          <tr><td>Upload 422 <code>DUPLICATE_FILE</code></td><td>This vendor already uploaded that fixture</td><td>Use another fixture or another vendor account</td></tr>
+          <tr><td>Every call after login is 401</td><td>Token not attached, or <code>Bearer</code> written wrongly</td><td>Use the API client; header must be exactly <code>Authorization: Bearer &lt;token&gt;</code></td></tr>
+          <tr><td>Logged out after a page reload</td><td>The token is kept in memory on purpose</td><td>Expected; log in again</td></tr>
+          <tr><td>Login 403 &ldquo;Missing or invalid CSRF token&rdquo;</td><td>The service still runs the older cookie build</td><td>Ask the backend owner to deploy this release</td></tr>
+          <tr><td>CORS error in the console</td><td>Browser code calls the API host directly</td><td>Keep <code>VITE_API_BASE_URL</code> empty and use the proxy (or ask the owner to allow your exact origin)</td></tr>
+          <tr><td>PDF frame shows 401</td><td><code>&lt;iframe src="/api/..."&gt;</code> sends no token</td><td>Fetch as blob and use an object URL (<a href="#pdf-preview">PDF preview</a>)</td></tr>
+          <tr><td>Upload 422 <code>INVALID_FILE</code></td><td>Not a readable PDF, password-protected or over 10 MB</td><td>Show <code>message</code>; the user picks another file</td></tr>
+          <tr><td>Upload 422 <code>DUPLICATE_FILE</code></td><td>This vendor already uploaded that exact file</td><td>Show the message; nothing to retry</td></tr>
           <tr><td>Multipart upload 400</td><td>Content-Type set by hand, or wrong field name</td><td>Let the browser set it; field name must be <code>file</code></td></tr>
-          <tr><td>PDF 404 after it worked</td><td>Demo service restarted; files are ephemeral</td><td>Expected in the demo; show a friendly message</td></tr>
+          <tr><td>Uploads stay <code>QUEUED</code></td><td>Extraction is not enabled on this server</td><td>Show the status as it is; the admin's queue status explains why</td></tr>
           <tr><td>First request very slow</td><td>Free service woke up from sleep</td><td>Wait; show a loading state</td></tr>
         </tbody>
       </table></div>
@@ -846,11 +892,11 @@ export function uploadFile(batchId: number, file: File) {
 import react from '@vitejs/plugin-react';
 export default defineConfig({ plugins: [react()], test: { environment: 'jsdom', setupFiles: ['./src/test/setup.ts'] } });</code></pre>
           and <code>src/test/setup.ts</code> with <code>import '@testing-library/jest-dom/vitest';</code>.</li>
-        <li>Unit-test the API client with a mocked <code>fetch</code>: the CSRF header is sent on POST/PUT and not on GET;
-          JSON vs <code>FormData</code>; a 401 calls the unauthorized handler; a 422 upload keeps <code>code</code>;
-          a non-JSON error still yields the real status.</li>
-        <li>Test the session provider (401 at start = logged out, not an error), route guards per role, and the key
-          screens' loading / empty / error states.</li>
+        <li>Unit-test the API client with a mocked <code>fetch</code>: the <code>Authorization</code> header is sent when
+          a token exists and not after logout; JSON vs <code>FormData</code> (no manual multipart Content-Type); a 401
+          clears the token and calls the session-ended handler; a 422 upload keeps <code>code</code>; a non-JSON error
+          still yields the real status; nothing is written to <code>localStorage</code>.</li>
+        <li>Test the session provider, route guards per role, and the key screens' loading / empty / error states.</li>
         <li>Mock data lives only in tests and is labelled <em>unit-test mock</em>. The running app never shows mock data
           as if it came from the API.</li>
         <li>Before every hand-in: <code>npm run lint</code>, <code>npm test</code>, <code>npm run build</code> &mdash; all
@@ -859,39 +905,37 @@ export default defineConfig({ plugins: [react()], test: { environment: 'jsdom', 
     </section>
 
     <section id="first-session" aria-labelledby="first-h">
-      <h2 id="first-h">First integration session (against the demo)</h2>
+      <h2 id="first-h">First integration session</h2>
       <h3>Read-only first</h3>
       <ul class="checklist">
-        <li>Open the dev app; the network tab shows <code>GET /api/health</code> &rarr; 200 with <code>X-Invoice-Demo</code>.</li>
-        <li><code>GET /api/auth/me</code> &rarr; 401 and an <code>XSRF-TOKEN</code> cookie appears.</li>
+        <li>Open the dev app; the network tab shows <code>GET /api/health</code> &rarr; 200 <code>{"status":"UP"}</code>.</li>
+        <li><code>GET /api/auth/me</code> without a token &rarr; 401 with <code>WWW-Authenticate: Bearer</code>; no cookie appears.</li>
       </ul>
-      <h3>Then, with the synthetic account the backend owner gave you</h3>
+      <h3>Then, with the test account the backend owner gave you</h3>
       <ul class="checklist">
-        <li>Log in (the request carries <code>X-XSRF-TOKEN</code>) &rarr; 200; <code>/api/auth/me</code> &rarr; 200 with your role.</li>
+        <li>Log in &rarr; 200 with <code>accessToken</code> and <code>user</code>; no <code>Set-Cookie</code> header.</li>
+        <li><code>GET /api/auth/me</code> with the Bearer header &rarr; 200 with your role.</li>
         <li>A wrong password shows the generic 401 message.</li>
         <li>Navigation matches the role; a forbidden URL typed by hand shows &ldquo;not allowed&rdquo; / &ldquo;not found&rdquo;.</li>
-        <li>Only with the owner's go-ahead: create, change or upload data &mdash; synthetic values and fixture files only.</li>
-        <li>Log out &rarr; 204; the next <code>/api/auth/me</code> &rarr; 401.</li>
+        <li>Only with the owner's go-ahead: create, change or upload data &mdash; synthetic values and sample PDFs only.</li>
+        <li>Log out &rarr; the token is gone from memory; the next protected call is not sent or gets 401.</li>
       </ul>
       <h3>Reporting an API mismatch</h3>
       <p>Send the backend owner: the route and method, the request body (without any password), the HTTP status, the
         response body, the <code>errorId</code> if present, and what this guide or <code>openapi.yaml</code> says
-        should happen. Never send cookies, tokens or passwords.</p>
+        should happen. Never send tokens or passwords &mdash; remove the <code>Authorization</code> header from any copied
+        request.</p>
     </section>
 
     <section id="hosting" aria-labelledby="hosting-h">
       <h2 id="hosting-h">Hosting the React app later</h2>
-      <p>The API is <strong>same-origin only</strong>: the browser must load React and call <code>/api/**</code> on the
-        same scheme, host and port. Locally that is the Vite proxy.</p>
       <ul>
-        <li>A React site on <code>frontend.onrender.com</code> calling <code>api.onrender.com</code> directly does
-          <strong>not</strong> work: two onrender.com hosts are different sites (Public Suffix List), the
-          <code>SameSite=Strict</code> cookie is not sent, and the page cannot read <code>XSRF-TOKEN</code>.</li>
-        <li>Supported: one public hostname that serves the React build and forwards <code>/api/*</code> to the backend
-          (reverse proxy / path-based routing). A Render Static Site rewrite to the API is a candidate, but forwarding of
-          POST bodies and cookies has not been verified.</li>
-        <li>Never ask for <code>Access-Control-Allow-Origin: *</code>, <code>SameSite=None</code> or disabling CSRF.
-          A separate API origin would be a deliberate, security-reviewed backend change.</li>
+        <li><strong>Simplest: one origin.</strong> One public hostname serves the React build and forwards
+          <code>/api/*</code> to the backend (reverse proxy / path-based routing). No CORS needed.</li>
+        <li><strong>Separate origin</strong> (e.g. React on its own host): possible with Bearer tokens. The backend owner
+          adds your exact origin to <code>INVOICE_CORS_ALLOWED_ORIGINS</code>; then set <code>VITE_API_BASE_URL</code> to
+          the API's public URL (a public value, not a secret). Never ask for <code>*</code>.</li>
+        <li>In both cases the token stays in memory and is sent only in the <code>Authorization</code> header.</li>
       </ul>
     </section>
 
@@ -899,14 +943,13 @@ export default defineConfig({ plugins: [react()], test: { environment: 'jsdom', 
       <h2 id="done-h">Definition of done</h2>
       <ul class="checklist">
         <li>All data comes from the documented routes through the one API client; no invented endpoints or fields.</li>
-        <li>Login, logout, session expiry and CSRF work in the browser through the proxy (shown live).</li>
+        <li>Login, logout, session expiry (401) and the Bearer header work in the browser (shown live).</li>
         <li>Navigation and screens per role; forbidden and not-found states handled.</li>
-        <li>Admin: users, categories, reviewer categories, intake/assignment, batches, queue status, dashboard.</li>
+        <li>Admin: users, categories, reviewer categories, intake/assignment, batches, queue status, dashboard, approvals, failed, decided.</li>
         <li>Vendor: dashboard, batch create, one-by-one upload with per-file results, close, batch detail.</li>
-        <li>Reviewer: dashboard, assigned list, read-only invoice view with PDF.</li>
-        <li>Review/approval screens built from the contract and clearly labelled &ldquo;not available in this demo&rdquo;.</li>
+        <li>Reviewer: dashboard, assigned list, PDF on the left (blob URL), editable data on the right, save as new version, versions list, submit.</li>
         <li>Loading, empty, error, retry and validation states everywhere; responsive to phone width; keyboard-only usable.</li>
-        <li>No secrets in code or <code>VITE_*</code>; no tokens in storage; no real data anywhere.</li>
+        <li>No secrets in code or <code>VITE_*</code>; no token in <code>localStorage</code>/<code>sessionStorage</code>; no real data in the repo.</li>
         <li><code>npm run lint</code>, <code>npm test</code> and <code>npm run build</code> pass.</li>
       </ul>
     </section>
@@ -919,13 +962,14 @@ export default defineConfig({ plugins: [react()], test: { environment: 'jsdom', 
         <dt>HTTP status</dt><dd>A number in the response: 2xx success, 4xx the request was not accepted, 5xx the server failed.</dd>
         <dt>JSON / DTO</dt><dd>JSON is the text data format; a DTO (data transfer object) is the fixed shape of one JSON response or request, e.g. <code>UserResponse</code>.</dd>
         <dt>Role</dt><dd>VENDOR, REVIEWER or ADMIN &mdash; decides which routes an account may call.</dd>
-        <dt>Cookie</dt><dd>A small value the browser stores per site and sends back automatically. <code>HttpOnly</code> cookies cannot be read by JavaScript.</dd>
-        <dt>CSRF</dt><dd>Cross-site request forgery: another website tricking your browser into sending a request. The <code>X-XSRF-TOKEN</code> header proves the request came from our own page.</dd>
+        <dt>JWT / access token</dt><dd>A signed text the backend issues at login. Whoever holds it is treated as that user for 30 minutes, so keep it in memory and never share it.</dd>
+        <dt>Bearer header</dt><dd><code>Authorization: Bearer &lt;token&gt;</code> &mdash; how every request proves who sends it.</dd>
+        <dt>CSRF</dt><dd>Cross-site request forgery: another website making your browser send a request with credentials the browser adds by itself (cookies). Not possible here because the token is only ever added by your own code.</dd>
         <dt>Origin / same-origin</dt><dd>Scheme + host + port of a page. Same-origin means the page and the API share all three.</dd>
-        <dt>CORS</dt><dd>Browser rules for calls to another origin. This API grants none, on purpose.</dd>
-        <dt>Proxy</dt><dd>The Vite dev server forwarding <code>/api/*</code> to the real API, so the browser only ever talks to one origin.</dd>
+        <dt>CORS</dt><dd>Browser rules for calls to another origin. Off by default here; the owner can allow exact origins.</dd>
+        <dt>Proxy</dt><dd>The Vite dev server forwarding <code>/api/*</code> to the real API, so the browser only talks to one origin.</dd>
         <dt>Multipart / FormData</dt><dd>The request format for file uploads; the browser builds it from a <code>FormData</code> object.</dd>
-        <dt>Fixture</dt><dd>A prepared test file; here, the six synthetic PDFs the demo accepts.</dd>
+        <dt>Version</dt><dd>One saved state of an invoice's data. V1 is what the AI extracted; each reviewer save adds V2, V3&hellip;; none is ever changed afterwards.</dd>
       </dl>
     </section>
   </main>

@@ -1,7 +1,6 @@
 package com.actify.invoice.pgtest;
 
 import com.actify.invoice.llm.LlmInvoiceExtractor;
-import com.actify.invoice.security.AuthCookies;
 import com.actify.invoice.security.JwtTokenService;
 import com.actify.invoice.user.AppUser;
 import com.actify.invoice.user.AppUserService;
@@ -46,7 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *  - tests only INSERT their own uniquely named rows; they never delete, truncate or drop anything.
  *
  * Login: every HTTP call made with TestRestTemplate is sent as a TEST-DATABASE admin (a real app_users row
- * created once per run with a unique email), with a real signed INVOICE_PROCESS_AUTH cookie and a CSRF header.
+ * created once per run with a unique email), with a real signed "Authorization: Bearer" header.
  * Use actAs(...) / actAnonymously() inside a test to call the API as another user.
  */
 @Tag("pgtest")
@@ -60,7 +59,6 @@ public abstract class AbstractPgIntegrationTest {
 
     /** Test-only password of the users this test run creates in the TEST database. */
     protected static final String TEST_PASSWORD = "pgtest password " + UUID.randomUUID().toString().substring(0, 8);
-    private static final String CSRF_VALUE = "pgtest-csrf-" + UUID.randomUUID();
 
     private static AppUser admin;
 
@@ -117,7 +115,7 @@ public abstract class AbstractPgIntegrationTest {
         authInterceptor().token = tokenService.issue(user);
     }
 
-    /** From now on, TestRestTemplate calls carry no login cookie (only the CSRF header). */
+    /** From now on, TestRestTemplate calls carry no Authorization header. */
     protected void actAnonymously() {
         authInterceptor().token = null;
     }
@@ -134,23 +132,16 @@ public abstract class AbstractPgIntegrationTest {
         return created;
     }
 
-    /** Adds the login cookie and the double-submit CSRF pair (XSRF-TOKEN cookie = X-XSRF-TOKEN header). */
+    /** Adds "Authorization: Bearer <token>" unless the request already sets its own Authorization header. */
     static final class AuthInterceptor implements ClientHttpRequestInterceptor {
         volatile String token;
 
         @Override
         public ClientHttpResponse intercept(HttpRequest request, byte[] body, ClientHttpRequestExecution execution)
                 throws IOException {
-            String cookies = "XSRF-TOKEN=" + CSRF_VALUE;
             String current = token;
-            if (current != null) {
-                cookies += "; " + AuthCookies.AUTH_COOKIE + "=" + current;
-            }
-            if (!request.getHeaders().containsKey(HttpHeaders.COOKIE)) {
-                request.getHeaders().add(HttpHeaders.COOKIE, cookies);
-            }
-            if (!request.getHeaders().containsKey("X-XSRF-TOKEN")) {
-                request.getHeaders().add("X-XSRF-TOKEN", CSRF_VALUE);
+            if (current != null && !request.getHeaders().containsKey(HttpHeaders.AUTHORIZATION)) {
+                request.getHeaders().setBearerAuth(current);
             }
             return execution.execute(request, body);
         }

@@ -78,6 +78,12 @@ public class GeminiInvoiceExtractor implements LlmInvoiceExtractor {
                     "Gemini API key is not configured. Set the GEMINI_API_KEY environment variable.",
                     InvoiceExtractionException.Kind.CONFIGURATION, null, null, null, null);
         }
+        // Backstop for every caller (worker and legacy endpoint): nothing leaves this server before the data policy
+        // allows it (GeminiConfig).
+        if (!geminiConfig.isDocumentSendingAllowed()) {
+            throw new InvoiceExtractionException(GeminiConfig.PAID_TIER_BLOCKED_REASON,
+                    InvoiceExtractionException.Kind.CONFIGURATION, null, null, null, null);
+        }
 
         String url = geminiConfig.getBaseUrl() + "/models/" + geminiConfig.getModel() + ":generateContent";
 

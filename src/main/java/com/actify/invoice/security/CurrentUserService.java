@@ -7,7 +7,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * "Who is making this request?" - read from Spring Security's SecurityContext, which
- * JwtCookieAuthenticationFilter filled from the database at the start of the request.
+ * JwtBearerAuthenticationFilter filled from the database at the start of the request.
  */
 @Component
 public class CurrentUserService {

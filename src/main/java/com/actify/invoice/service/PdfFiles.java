@@ -1,6 +1,9 @@
 package com.actify.invoice.service;
 
 import com.actify.invoice.exception.InvalidInvoiceException;
+import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -11,7 +14,11 @@ import java.util.Set;
 
 /**
  * The upload checks for one PDF, shared by the legacy single-file endpoint and the batch intake,
- * so both apply exactly the same rules (OWASP file upload: size, extension, type, real signature).
+ * so both apply exactly the same rules (OWASP file upload: size, extension, type, real signature, and the file must
+ * really open as a PDF with at least one page).
+ *
+ * Any real invoice PDF that passes these checks is accepted - there is no list of "allowed" files. These checks are
+ * NOT a virus scan: they only make sure the file is a readable PDF of an acceptable size.
  */
 public final class PdfFiles {
 
@@ -59,7 +66,28 @@ public final class PdfFiles {
         if (!startsWithPdfSignature(bytes)) {
             throw new InvalidInvoiceException("File content is not a valid PDF");
         }
+        requireReadablePdf(bytes);
         return bytes;
+    }
+
+    /**
+     * Opens the PDF with Apache PDFBox (in memory; the size was already capped at 10 MB) and checks it has pages.
+     * Only the structure is read - nothing is rendered or executed. A password-protected file is refused because
+     * neither the extraction nor the reviewer could read it. PDFBox messages are never returned: they may quote
+     * file content.
+     */
+    static void requireReadablePdf(byte[] bytes) {
+        int pages;
+        try (PDDocument document = Loader.loadPDF(bytes)) {
+            pages = document.getNumberOfPages();
+        } catch (InvalidPasswordException e) {
+            throw new InvalidInvoiceException("Password-protected PDFs cannot be processed. Upload the file without a password.");
+        } catch (IOException | RuntimeException e) {
+            throw new InvalidInvoiceException("The file could not be opened as a PDF (damaged or incomplete)");
+        }
+        if (pages < 1) {
+            throw new InvalidInvoiceException("The PDF has no pages");
+        }
     }
 
     private static boolean startsWithPdfSignature(byte[] bytes) {

@@ -34,9 +34,9 @@ cloudFiles/
 # Screenshots and exported pages of the retired UI - personal/local material, never published
 # Any PDF (real invoices must never enter Git; test fixtures are generated or kept local)
 *.pdf
-# Sole exception: the six SYNTHETIC free-demo upload fixtures. Their SHA-256 values are the demo's allowlist and
-# FreeDemoFixtureTest fails if any file here is added, removed or changed. Never put a real document in this folder.
-!docs/react-handoff/demo-fixtures/synthetic-demo-invoice-0[1-6].pdf
+# Sole exception: six SYNTHETIC sample invoices for trying the upload screens. They are examples only - the API
+# accepts any valid invoice PDF. Never put a real document in this folder.
+!docs/react-handoff/sample-invoices/synthetic-sample-invoice-0[1-6].pdf
 /*.png
 /*.jpg
 /*.jpeg

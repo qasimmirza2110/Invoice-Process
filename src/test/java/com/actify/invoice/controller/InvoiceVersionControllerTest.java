@@ -27,7 +27,7 @@ import com.actify.invoice.user.AppUserRepository;
 import com.actify.invoice.user.Role;
 import org.junit.jupiter.api.BeforeEach;
 
-import javax.servlet.http.Cookie;
+import org.springframework.test.web.servlet.request.RequestPostProcessor;
 
 import java.util.Collections;
 
@@ -39,7 +39,6 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -72,13 +71,13 @@ class InvoiceVersionControllerTest {
 
     @BeforeEach
     void loginAsAdmin() {
-        Cookie admin = TestLogins.cookieFor(TestLogins.user(1, Role.ADMIN), userRepository, tokenService);
+        RequestPostProcessor admin = TestLogins.bearerFor(TestLogins.user(1, Role.ADMIN), userRepository, tokenService);
         // Corrections by an admin are allowed on LEGACY invoices (no owner) - which every invoice in this test is.
         org.mockito.Mockito.lenient().when(invoiceRepository.findById(org.mockito.ArgumentMatchers.anyLong()))
                 .thenAnswer(i -> { com.actify.invoice.entity.Invoice legacy = new com.actify.invoice.entity.Invoice();
                     legacy.setId(i.getArgument(0)); return java.util.Optional.of(legacy); });
         mockMvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity())
-                .defaultRequest(get("/").cookie(admin).with(csrf())).build();
+                .defaultRequest(get("/").with(admin)).build();
     }
 
     @MockBean

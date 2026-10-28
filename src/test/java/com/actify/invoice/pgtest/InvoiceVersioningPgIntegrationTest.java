@@ -98,9 +98,9 @@ class InvoiceVersioningPgIntegrationTest extends AbstractPgIntegrationTest {
         return prefix + "-" + UUID.randomUUID().toString().substring(0, 8);
     }
 
-    /** Synthetic bytes only - a minimal "%PDF-" header plus a unique marker. Never a real invoice. */
+    /** A real, openable synthetic PDF with a unique marker. Never a real invoice. */
     private byte[] syntheticPdf(String marker) {
-        return ("%PDF-1.4\n% synthetic integration-test document " + marker + "\n%%EOF\n").getBytes(StandardCharsets.US_ASCII);
+        return com.actify.invoice.service.TestPdfs.onePage("integration-test document " + marker);
     }
 
     private ResponseEntity<String> upload(byte[] bytes, String fileName) {

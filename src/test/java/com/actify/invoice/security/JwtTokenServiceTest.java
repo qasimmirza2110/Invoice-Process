@@ -14,7 +14,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * The login token itself: which claims it carries, that expiry, foreign keys and bad secrets are refused, and that the
- * application identity (issuer, audience, cookie name) is exactly the one documented for frontends.
+ * application identity (issuer, audience) is exactly the one documented for frontends.
  */
 class JwtTokenServiceTest {
 
@@ -23,7 +23,16 @@ class JwtTokenServiceTest {
     void theApplicationIdentityIsActifyInvoiceProcess() {
         assertThat(JwtTokenService.ISSUER).isEqualTo("actify-invoice-process");
         assertThat(JwtTokenService.AUDIENCE).isEqualTo("actify-invoice-process-web");
-        assertThat(AuthCookies.AUTH_COOKIE).isEqualTo("INVOICE_PROCESS_AUTH");
+    }
+
+    /** The expiry the login response reports is exactly the token's own "exp" claim. */
+    @Test
+    void theReportedExpiryMatchesTheTokensExpClaim() {
+        JwtTokenService service = TestLogins.tokenService();
+        JwtTokenService.IssuedToken issued = service.issueWithExpiry(TestLogins.user(43, Role.VENDOR));
+        Jwt jwt = service.decode(issued.getValue());
+        assertThat(jwt.getExpiresAt()).isEqualTo(issued.getExpiresAt().truncatedTo(java.time.temporal.ChronoUnit.SECONDS));
+        assertThat(issued.toString()).doesNotContain(issued.getValue());
     }
 
     @Test
@@ -77,7 +86,7 @@ class JwtTokenServiceTest {
         String token = first.issue(TestLogins.user(5, Role.REVIEWER));
 
         assertThat(first.decode(token).getSubject()).isEqualTo("5");
-        // A new run gets a new key, so an old login cookie is no longer valid.
+        // A new run gets a new key, so an old access token is no longer valid.
         assertThatThrownBy(() -> second.decode(token)).isInstanceOf(JwtException.class);
     }
 

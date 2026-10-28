@@ -4,7 +4,7 @@ import com.actify.invoice.user.AppUser;
 import com.actify.invoice.user.Role;
 
 /**
- * The logged-in user for the current request, as loaded FROM THE DATABASE by JwtCookieAuthenticationFilter.
+ * The logged-in user for the current request, as loaded FROM THE DATABASE by JwtBearerAuthenticationFilter.
  * Controllers and services read it through CurrentUserService. It never comes from browser input.
  */
 public final class AuthenticatedUser {

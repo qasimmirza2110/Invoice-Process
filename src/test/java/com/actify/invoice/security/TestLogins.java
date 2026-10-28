@@ -3,15 +3,16 @@ package com.actify.invoice.security;
 import com.actify.invoice.user.AppUser;
 import com.actify.invoice.user.AppUserRepository;
 import com.actify.invoice.user.Role;
+import org.springframework.http.HttpHeaders;
+import org.springframework.test.web.servlet.request.RequestPostProcessor;
 
-import javax.servlet.http.Cookie;
 import java.util.Optional;
 
 import static org.mockito.Mockito.when;
 
 /**
- * Builds real login cookies for MockMvc tests: a user that the (mocked) repository will return, and a
- * INVOICE_PROCESS_AUTH cookie signed by the real JwtTokenService - so the real JwtCookieAuthenticationFilter runs.
+ * Builds real access tokens for MockMvc tests: a user that the (mocked) repository will return, and an
+ * "Authorization: Bearer ..." header signed by the real JwtTokenService - so the real JwtBearerAuthenticationFilter runs.
  */
 public final class TestLogins {
 
@@ -28,10 +29,23 @@ public final class TestLogins {
         return user;
     }
 
-    /** Makes the mocked repository know the user and returns a valid login cookie for it. */
-    public static Cookie cookieFor(AppUser user, AppUserRepository repository, JwtTokenService tokens) {
+    /** Makes the mocked repository know the user and returns a valid access token for it. */
+    public static String tokenFor(AppUser user, AppUserRepository repository, JwtTokenService tokens) {
         when(repository.findById(user.getId())).thenReturn(Optional.of(user));
-        return new Cookie(AuthCookies.AUTH_COOKIE, tokens.issue(user));
+        return tokens.issue(user);
+    }
+
+    /** Same as tokenFor, already wrapped as the request's Authorization header. */
+    public static RequestPostProcessor bearerFor(AppUser user, AppUserRepository repository, JwtTokenService tokens) {
+        return bearer(tokenFor(user, repository, tokens));
+    }
+
+    /** "Authorization: Bearer <token>" - exactly what the React client sends. */
+    public static RequestPostProcessor bearer(String token) {
+        return request -> {
+            request.addHeader(HttpHeaders.AUTHORIZATION, "Bearer " + token);
+            return request;
+        };
     }
 
     public static JwtTokenService tokenService() {

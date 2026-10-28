@@ -95,10 +95,9 @@ abstract class AbstractQueuePgTest extends AbstractPgIntegrationTest {
         return json(upload.getBody()).get("invoiceId").asLong();
     }
 
-    /** Synthetic bytes only - never a real invoice. */
+    /** A real, openable synthetic PDF (the upload check parses it) - never a real invoice. */
     protected static byte[] syntheticPdf(String marker) {
-        return ("%PDF-1.4\n% synthetic workflow test " + marker + " " + UUID.randomUUID() + "\n%%EOF\n")
-                .getBytes(StandardCharsets.US_ASCII);
+        return com.actify.invoice.service.TestPdfs.onePage("workflow test " + marker + " " + UUID.randomUUID());
     }
 
     /** A consistent synthetic invoice: 100.00 + 18.00 tax = 118.00. */

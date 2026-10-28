@@ -17,12 +17,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Private PDF storage on a temporary folder: exact bytes under a generated UUID name, SHA-256 recorded and re-checked
- * on read (tampering is detected), no overwrite of existing files, no temporary file left behind, and no path other
- * than a canonical UUID can be resolved (path traversal protection). A temporary folder proves the code, not that a
- * hosted disk is persistent or writable - that is the post-deploy check in docs/RENDER_DEPLOYMENT.md.
+ * Private PDF storage on a local folder (invoice.storage.type=local: local runs and tests). Exact bytes under a
+ * generated UUID name, SHA-256 recorded and re-checked on read (tampering is detected), no overwrite of existing files,
+ * no temporary file left behind, and no path other than a canonical UUID can be resolved (path traversal protection).
+ * Render never uses this class: it stores PDFs in the private bucket (S3DocumentStorageTest).
  */
-class InvoiceDocumentStorageTest {
+class LocalDocumentStorageTest {
 
     @TempDir
     Path dir;
@@ -31,13 +31,13 @@ class InvoiceDocumentStorageTest {
 
     @Test
     void refusesARelativeOrMissingStorageDirectory() {
-        assertThatThrownBy(() -> new InvoiceDocumentStorage("relative/folder")).hasMessageContaining("absolute");
-        assertThatThrownBy(() -> new InvoiceDocumentStorage(" ")).hasMessageContaining("absolute");
+        assertThatThrownBy(() -> new LocalDocumentStorage("relative/folder")).hasMessageContaining("absolute");
+        assertThatThrownBy(() -> new LocalDocumentStorage(" ")).hasMessageContaining("absolute");
     }
 
     @Test
     void storesExactBytesUnderAGeneratedUuidAndRecordsTheirSha256() throws Exception {
-        InvoiceDocumentStorage storage = new InvoiceDocumentStorage(dir.resolve("docs").toString());
+        LocalDocumentStorage storage = new LocalDocumentStorage(dir.resolve("docs").toString());
 
         StoredDocument stored = storage.store(pdf);
 
@@ -57,7 +57,7 @@ class InvoiceDocumentStorageTest {
 
     @Test
     void identicalUploadsGetSeparateFilesAndNeverOverwriteEachOther() {
-        InvoiceDocumentStorage storage = new InvoiceDocumentStorage(dir.toString());
+        LocalDocumentStorage storage = new LocalDocumentStorage(dir.toString());
         StoredDocument a = storage.store(pdf);
         StoredDocument b = storage.store(pdf);
         assertThat(a.getId()).isNotEqualTo(b.getId());
@@ -68,7 +68,7 @@ class InvoiceDocumentStorageTest {
 
     @Test
     void detectsATamperedFile() throws Exception {
-        InvoiceDocumentStorage storage = new InvoiceDocumentStorage(dir.toString());
+        LocalDocumentStorage storage = new LocalDocumentStorage(dir.toString());
         StoredDocument stored = storage.store(pdf);
         Files.write(dir.resolve(stored.getId() + ".pdf"), "%PDF-1.4 changed".getBytes(StandardCharsets.US_ASCII));
 
@@ -80,14 +80,14 @@ class InvoiceDocumentStorageTest {
 
     @Test
     void missingFileIsNotFound() {
-        InvoiceDocumentStorage storage = new InvoiceDocumentStorage(dir.toString());
+        LocalDocumentStorage storage = new LocalDocumentStorage(dir.toString());
         assertThatThrownBy(() -> storage.read(UUID.randomUUID().toString(), "x"))
                 .isInstanceOf(DocumentNotFoundException.class);
     }
 
     @Test
     void onlyCanonicalUuidsCanBecomeFileNames() {
-        InvoiceDocumentStorage storage = new InvoiceDocumentStorage(dir.toString());
+        LocalDocumentStorage storage = new LocalDocumentStorage(dir.toString());
         String upper = UUID.randomUUID().toString().toUpperCase();
         for (String bad : new String[]{"../secret", "..\\secret", "a/b", "", "not-a-uuid", upper, "1-1-1-1-1", null}) {
             assertThatThrownBy(() -> storage.resolve(bad)).as(String.valueOf(bad)).isInstanceOf(DocumentNotFoundException.class);
@@ -98,7 +98,7 @@ class InvoiceDocumentStorageTest {
 
     @Test
     void aStoredDocumentLeavesOnlyItsFinalFileNoTemporaryFile() throws Exception {
-        InvoiceDocumentStorage storage = new InvoiceDocumentStorage(dir.toString());
+        LocalDocumentStorage storage = new LocalDocumentStorage(dir.toString());
         StoredDocument a = storage.store(pdf);
         StoredDocument b = storage.store(pdf);
 
@@ -108,7 +108,7 @@ class InvoiceDocumentStorageTest {
     @Test
     void anUnusableStorageFolderFailsCleanlyWithoutAPathInTheMessageAndLeavesNothingBehind() throws Exception {
         Path notAFolder = Files.write(dir.resolve("plain-file"), new byte[]{1});
-        InvoiceDocumentStorage storage = new InvoiceDocumentStorage(notAFolder.toString());
+        LocalDocumentStorage storage = new LocalDocumentStorage(notAFolder.toString());
 
         assertThatThrownBy(() -> storage.store(pdf))
                 .isInstanceOf(DocumentStorageException.class)
@@ -119,19 +119,19 @@ class InvoiceDocumentStorageTest {
     }
 
     @Test
-    void verifyWritableCreatesTheFolderProbesItAndLeavesItEmpty() throws Exception {
+    void verifyReadyCreatesTheFolderProbesItAndLeavesItEmpty() throws Exception {
         Path folder = dir.resolve("mount").resolve("invoice-documents");
-        new InvoiceDocumentStorage(folder.toString()).verifyWritable();
+        new LocalDocumentStorage(folder.toString()).verifyReady();
 
         assertThat(Files.isDirectory(folder)).isTrue();
         assertThat(fileNames(folder)).isEmpty();
     }
 
     @Test
-    void verifyWritableRefusesAFolderThatCannotBeWritten() throws Exception {
+    void verifyReadyRefusesAFolderThatCannotBeWritten() throws Exception {
         Path notAFolder = Files.write(dir.resolve("plain-file"), new byte[]{1});
 
-        assertThatThrownBy(() -> new InvoiceDocumentStorage(notAFolder.toString()).verifyWritable())
+        assertThatThrownBy(() -> new LocalDocumentStorage(notAFolder.toString()).verifyReady())
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("is not writable by this process");
         assertThat(fileNames(dir)).containsExactly("plain-file");
@@ -145,7 +145,7 @@ class InvoiceDocumentStorageTest {
 
     @Test
     void deleteQuietlyRemovesTheFileAndNeverThrows() {
-        InvoiceDocumentStorage storage = new InvoiceDocumentStorage(dir.toString());
+        LocalDocumentStorage storage = new LocalDocumentStorage(dir.toString());
         StoredDocument stored = storage.store(pdf);
         storage.deleteQuietly(stored.getId());
         assertThat(storage.exists(stored.getId())).isFalse();

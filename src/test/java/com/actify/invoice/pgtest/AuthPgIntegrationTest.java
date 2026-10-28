@@ -3,7 +3,7 @@ package com.actify.invoice.pgtest;
 import com.actify.invoice.dto.InvoiceExtractionResult;
 import com.actify.invoice.dto.InvoiceItemDto;
 import com.actify.invoice.dto.LlmExtractionResponse;
-import com.actify.invoice.security.AuthCookies;
+import com.actify.invoice.service.TestPdfs;
 import com.actify.invoice.user.AppUser;
 import com.actify.invoice.user.Role;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -49,7 +49,7 @@ class AuthPgIntegrationTest extends AbstractPgIntegrationTest {
     }
 
     @Test
-    void realLoginSetsAnHttpOnlyCookieThatAuthenticatesTheNextRequest() throws Exception {
+    void realLoginReturnsABearerTokenThatAuthenticatesTheNextRequest() throws Exception {
         AppUser vendor = createUser(Role.VENDOR);
         actAnonymously();
 
@@ -58,12 +58,12 @@ class AuthPgIntegrationTest extends AbstractPgIntegrationTest {
                 String.class);
 
         assertThat(login.getStatusCode()).isEqualTo(HttpStatus.OK);
-        String setCookie = login.getHeaders().get(HttpHeaders.SET_COOKIE).stream()
-                .filter(c -> c.startsWith(AuthCookies.AUTH_COOKIE + "=")).findFirst().orElseThrow(AssertionError::new);
-        assertThat(setCookie).contains("HttpOnly").contains("SameSite=Strict");
-        assertThat(login.getBody()).doesNotContain(cookieValue(setCookie));
+        assertThat(login.getHeaders().get(HttpHeaders.SET_COOKIE)).as("no cookie").isNull();
+        JsonNode body = objectMapper.readTree(login.getBody());
+        assertThat(body.get("tokenType").asText()).isEqualTo("Bearer");
+        assertThat(body.get("user").get("id").asLong()).isEqualTo(vendor.getId());
 
-        ResponseEntity<String> me = withCookie(HttpMethod.GET, "/api/auth/me", cookieValue(setCookie));
+        ResponseEntity<String> me = withBearer(HttpMethod.GET, "/api/auth/me", body.get("accessToken").asText());
         assertThat(me.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(objectMapper.readTree(me.getBody()).get("role").asText()).isEqualTo("VENDOR");
         // (Wrong-password 401s are covered in AuthSecurityWebTest: the JDK HTTP client used here cannot read a
@@ -74,7 +74,7 @@ class AuthPgIntegrationTest extends AbstractPgIntegrationTest {
     void disablingAUserThroughTheAdminApiEndsTheirExistingSession() {
         AppUser vendor = createUser(Role.VENDOR);
         String vendorToken = tokenService.issue(vendor);
-        assertThat(withCookie(HttpMethod.GET, "/api/auth/me", vendorToken).getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(withBearer(HttpMethod.GET, "/api/auth/me", vendorToken).getStatusCode()).isEqualTo(HttpStatus.OK);
 
         ResponseEntity<String> disable = restTemplate.exchange("/api/admin/users/" + vendor.getId() + "/enabled",
                 HttpMethod.PUT, json("{\"enabled\":false}"), String.class);
@@ -82,7 +82,7 @@ class AuthPgIntegrationTest extends AbstractPgIntegrationTest {
         assertThat(jdbc.queryForObject("select token_version from app_users where id = ?", Integer.class, vendor.getId()))
                 .isEqualTo(1);
 
-        assertThat(withCookie(HttpMethod.GET, "/api/auth/me", vendorToken).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(withBearer(HttpMethod.GET, "/api/auth/me", vendorToken).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
     @Test
@@ -112,14 +112,13 @@ class AuthPgIntegrationTest extends AbstractPgIntegrationTest {
     }
 
     @Test
-    void writesWithoutTheCsrfHeaderAreRefusedEvenWithAValidLogin() {
+    void aValidTokenInTheOldCookieAuthenticatesNothing() {
+        actAnonymously();
         HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.add(HttpHeaders.COOKIE, AuthCookies.AUTH_COOKIE + "=" + tokenService.issue(testAdmin()));
-        headers.add("X-XSRF-TOKEN", "does-not-match-the-cookie");
-        ResponseEntity<String> response = restTemplate.exchange("/api/admin/users", HttpMethod.POST,
-                new HttpEntity<>("{}", headers), String.class);
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        headers.add(HttpHeaders.COOKIE, "INVOICE_PROCESS_AUTH=" + tokenService.issue(testAdmin()));
+        ResponseEntity<String> response = restTemplate.exchange("/api/admin/users", HttpMethod.GET,
+                new HttpEntity<>(headers), String.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
     // ------------------------------------------------------------------ helpers
@@ -136,7 +135,7 @@ class AuthPgIntegrationTest extends AbstractPgIntegrationTest {
         r.setRawResponse("{\"synthetic\":true}");
         when(llmInvoiceExtractor.extract(any(byte[].class))).thenReturn(new LlmExtractionResponse(r, null));
 
-        byte[] pdf = ("%PDF-1.4\n% synthetic auth test " + UUID.randomUUID() + "\n%%EOF\n").getBytes(StandardCharsets.US_ASCII);
+        byte[] pdf = TestPdfs.onePage("auth test " + UUID.randomUUID());
         MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
         body.add("file", new ByteArrayResource(pdf) {
             @Override
@@ -152,9 +151,9 @@ class AuthPgIntegrationTest extends AbstractPgIntegrationTest {
         return invoice.get("id").asLong();
     }
 
-    private ResponseEntity<String> withCookie(HttpMethod method, String url, String token) {
+    private ResponseEntity<String> withBearer(HttpMethod method, String url, String token) {
         HttpHeaders headers = new HttpHeaders();
-        headers.add(HttpHeaders.COOKIE, AuthCookies.AUTH_COOKIE + "=" + token);
+        headers.setBearerAuth(token);
         return restTemplate.exchange(url, method, new HttpEntity<>(headers), String.class);
     }
 
@@ -162,9 +161,5 @@ class AuthPgIntegrationTest extends AbstractPgIntegrationTest {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         return new HttpEntity<>(body, headers);
-    }
-
-    private static String cookieValue(String setCookie) {
-        return setCookie.substring(setCookie.indexOf('=') + 1, setCookie.indexOf(';'));
     }
 }

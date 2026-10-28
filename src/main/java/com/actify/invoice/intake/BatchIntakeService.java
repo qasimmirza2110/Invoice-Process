@@ -7,7 +7,6 @@ import com.actify.invoice.dto.BatchDtos.FileIntakeResponse;
 import com.actify.invoice.dto.BatchDtos.RejectedFile;
 import com.actify.invoice.dto.FieldErrorDto;
 import com.actify.invoice.cloud.CloudSourceSettings;
-import com.actify.invoice.config.FreeDemoUploadPolicy;
 import com.actify.invoice.entity.BatchSource;
 import com.actify.invoice.entity.BatchStatus;
 import com.actify.invoice.entity.ExtractionJob;
@@ -63,8 +62,7 @@ import java.util.Map;
  *      2 and 3, an orphan file can remain. SQL cannot see the disk: finding one means comparing the files in the
  *      storage folder with the invoice_documents ids (files are named {id}.pdf; a manual check, no tool for it yet).
  * A rejected file never becomes an invoice; its name and reason are recorded on the batch.
- * Free demo only (FreeDemoUploadPolicy): before step 1, a file that is not one of the published synthetic fixtures
- * is rejected with NOT_A_DEMO_FIXTURE - never stored, and recorded under a neutral name instead of its own.
+ * Any real invoice PDF that passes PdfFiles is accepted: there is no list of allowed files or vendors' e-mail domains.
  */
 @Service
 public class BatchIntakeService {
@@ -83,7 +81,6 @@ public class BatchIntakeService {
     private final ObjectMapper objectMapper;
     private final CategoryCodes categoryCodes;
     private final CloudSourceSettings cloudSources;
-    private final FreeDemoUploadPolicy demoUploads;
     private final int maxAttempts;
 
     @PersistenceContext
@@ -94,7 +91,6 @@ public class BatchIntakeService {
                               InvoiceDocumentStorage documentStorage, WorkflowService workflow,
                               CurrentUserService currentUser, TransactionTemplate transactionTemplate,
                               ObjectMapper objectMapper, CategoryCodes categoryCodes, CloudSourceSettings cloudSources,
-                              FreeDemoUploadPolicy demoUploads,
                               @Value("${invoice.worker.max-attempts:3}") int maxAttempts) {
         this.batchRepository = batchRepository;
         this.invoiceRepository = invoiceRepository;
@@ -107,7 +103,6 @@ public class BatchIntakeService {
         this.objectMapper = objectMapper;
         this.categoryCodes = categoryCodes;
         this.cloudSources = cloudSources;
-        this.demoUploads = demoUploads;
         this.maxAttempts = maxAttempts;
     }
 
@@ -217,11 +212,6 @@ public class BatchIntakeService {
         requireOwner(batch, user);
         requireAcceptingFiles(batch);
 
-        // Free demo: FIRST, so a non-fixture file is never stored and its (possibly real) name never recorded.
-        if (demoUploads.isEnforced() && !demoUploads.allows(sha256OrNull(file))) {
-            return reject(batchId, FreeDemoUploadPolicy.NEUTRAL_FILE_NAME, FreeDemoUploadPolicy.REJECTION_CODE,
-                    FreeDemoUploadPolicy.REJECTION_MESSAGE);
-        }
         if (!sourceMatches(batch.getSource(), declaredSource)) {
             return reject(batchId, fileName, "SOURCE_MISMATCH", "This batch only takes files from "
                     + batch.getSource() + "; start a new batch for another source.");
@@ -328,18 +318,6 @@ public class BatchIntakeService {
         });
         log.info("Batch {}: file rejected ({})", batchId, code);
         return FileIntakeResponse.rejected(fileName, code, message);
-    }
-
-    /** SHA-256 of the uploaded bytes, or null when there is no readable file (null is never on the allowlist). */
-    private static String sha256OrNull(MultipartFile file) {
-        if (file == null || file.isEmpty() || file.getSize() > PdfFiles.MAX_FILE_SIZE_BYTES) {
-            return null;
-        }
-        try {
-            return InvoiceDocumentStorage.sha256Hex(file.getBytes());
-        } catch (java.io.IOException e) {
-            return null;
-        }
     }
 
     private void requireOwner(UploadBatch batch, AuthenticatedUser user) {

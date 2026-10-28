@@ -59,32 +59,38 @@ class DefaultProfileBootLoadingTest {
         }
     }
 
-    /** The container profile: external binding, Secure cookie, worker off - and still guarded by SchemaSafetyGuard. */
+    /** The container profile: all interfaces, remote PDF storage, small pool, worker off, SchemaSafetyGuard on. */
     @Test
     void theRenderProfileBindsToPortAndAllInterfacesAndStaysGuarded() {
         String url = "--INVOICE_DB_URL=jdbc:postgresql://db-internal.example:5432/invoice_process_prod";
         try (ConfigurableApplicationContext context = start("--spring.profiles.active=render", "--PORT=10000", url,
-                "--INVOICE_STORAGE_DIR=/var/data/invoice-documents")) {
+                "--INVOICE_S3_BUCKET=invoice-documents")) {
             Environment env = context.getEnvironment();
             assertThat(env.getProperty("server.address")).isEqualTo("0.0.0.0");
             assertThat(env.getProperty("server.port")).isEqualTo("10000");
-            assertThat(env.getProperty("invoice.auth.cookie-secure")).isEqualTo("true");
+            assertThat(env.getProperty("invoice.cors.allowed-origins")).isEmpty();
             assertThat(env.getProperty("invoice.jwt.allow-ephemeral-secret")).isEqualTo("false");
             assertThat(env.getProperty("invoice.worker.enabled")).isEqualTo("false");
             assertThat(env.getProperty("invoice.legacy-extract.enabled")).isEqualTo("false");
             assertThat(env.getProperty("spring.jpa.hibernate.ddl-auto")).isEqualTo("validate");
-            assertThat(env.getProperty("invoice.storage.dir")).isEqualTo("/var/data/invoice-documents");
+            assertThat(env.getProperty("invoice.storage.type")).isEqualTo("s3");
+            assertThat(env.getProperty("invoice.storage.s3.bucket")).isEqualTo("invoice-documents");
+            assertThat(env.getProperty("invoice.storage.require-remote")).isEqualTo("true");
+            assertThat(env.getProperty("spring.datasource.hikari.maximum-pool-size")).isEqualTo("3");
+            assertThat(env.getProperty("spring.datasource.hikari.minimum-idle")).isEqualTo("0");
             assertThat(env.getProperty("invoice.storage.verify-on-startup")).isEqualTo("true");
+            assertThat(env.getProperty("invoice.gemini.require-paid-tier")).isEqualTo("true");
+            assertThat(env.getProperty("invoice.gemini.paid-tier-confirmed")).isEqualTo("false");
             // Not approved -> refused before any connection.
             assertThatThrownBy(() -> SchemaSafetyGuard.check(env)).hasMessageContaining("not approved");
         }
         try (ConfigurableApplicationContext context = start("--spring.profiles.active=render", url,
-                "--INVOICE_STORAGE_DIR=/var/data/invoice-documents", "--INVOICE_LIVE_START_APPROVED=true",
+                "--INVOICE_LIVE_START_APPROVED=true",
                 "--INVOICE_APPROVED_DATABASE=db-internal.example:5432/invoice_process_prod")) {
             SchemaSafetyGuard.check(context.getEnvironment()); // the one approved database: allowed
         }
         try (ConfigurableApplicationContext context = start("--spring.profiles.active=render", url,
-                "--INVOICE_STORAGE_DIR=/var/data/invoice-documents", "--INVOICE_LIVE_START_APPROVED=true",
+                "--INVOICE_LIVE_START_APPROVED=true",
                 "--INVOICE_APPROVED_DATABASE=localhost:5432/" + SchemaSafetyGuard.LIVE_DATABASE)) {
             Environment env = context.getEnvironment();
             assertThatThrownBy(() -> SchemaSafetyGuard.check(env)).hasMessageContaining("only")
@@ -92,58 +98,54 @@ class DefaultProfileBootLoadingTest {
         }
     }
 
-    /** Without INVOICE_DB_URL / INVOICE_STORAGE_DIR the render profile has no fallback to localhost or a home folder. */
+    /** Without INVOICE_DB_URL the render profile has no localhost fallback, and PDFs never fall back to a local folder. */
     @Test
     void theRenderProfileHasNoLocalDatabaseOrStorageFallback() {
         try (ConfigurableApplicationContext context = start("--spring.profiles.active=render")) {
             Environment env = context.getEnvironment();
             assertThatThrownBy(() -> env.getProperty("spring.datasource.url")).hasMessageContaining("INVOICE_DB_URL");
-            assertThatThrownBy(() -> env.getProperty("invoice.storage.dir")).hasMessageContaining("INVOICE_STORAGE_DIR");
+            assertThat(env.getProperty("invoice.storage.type")).isEqualTo("s3");
+            assertThat(env.getProperty("invoice.storage.s3.bucket")).isEmpty(); // -> S3DocumentStorage refuses to start
         }
     }
 
     /**
-     * The free demo with Spring Boot's real loading: its own file, ephemeral storage, no Gemini - and it is still
-     * guarded by SchemaSafetyGuard. The second start passes Render-style OS environment variables, which override
-     * the profile file through relaxed binding; the guard must catch every one of them.
+     * Render-style OS environment variables switch the owner decisions on through relaxed binding; nothing else does.
+     * The local demo keeps the paid-project requirement off (synthetic files only); every other start has it on.
      */
     @Test
-    void theFreeDemoProfileIsSeparateGuardedAndRefusesOverrides() {
-        String url = "--INVOICE_DB_URL=jdbc:postgresql://dpg-demo.example:5432/invoice_demo";
-        try (ConfigurableApplicationContext context = start("--spring.profiles.active=render-free-demo", url)) {
+    void ownerDecisionsComeOnlyFromExplicitEnvironmentVariables() {
+        Map<String, Object> variables = new HashMap<>();
+        variables.put("SPRING_PROFILES_ACTIVE", "render");
+        variables.put("INVOICE_DB_URL", "jdbc:postgresql://db-internal.example:5432/invoice_process_prod");
+        variables.put("INVOICE_S3_ENDPOINT", "https://storage.example.com");
+        variables.put("INVOICE_GEMINI_PAID_TIER_CONFIRMED", "true");
+        variables.put("INVOICE_S3_BUCKET", "invoice-documents");
+        variables.put("INVOICE_CORS_ALLOWED_ORIGINS", "https://invoices.example.com");
+        try (ConfigurableApplicationContext context = startWithEnvironment(variables)) {
             Environment env = context.getEnvironment();
-            assertThat(env.getActiveProfiles()).containsExactly(RenderFreeDemoGuard.PROFILE);
-            assertThat(env.getProperty("invoice.storage.dir")).isEqualTo(RenderFreeDemoGuard.STORAGE_ROOT);
-            assertThat(env.getProperty("server.address")).isEqualTo("0.0.0.0");
-            assertThat(env.getProperty("invoice.auth.cookie-secure")).isEqualTo("true");
-            assertThat(env.getProperty("spring.jpa.hibernate.ddl-auto")).isEqualTo("validate");
-            assertThat(env.getProperty("gemini.api-key")).isEmpty();
-            RenderFreeDemoGuard.check(env);                                       // passes as shipped
-            assertThatThrownBy(() -> SchemaSafetyGuard.check(env)).hasMessageContaining("not approved");
+            assertThat(env.getProperty("invoice.gemini.paid-tier-confirmed")).isEqualTo("true");
+            assertThat(env.getProperty("invoice.storage.s3.endpoint")).isEqualTo("https://storage.example.com");
+            assertThat(env.getProperty("invoice.storage.s3.bucket")).isEqualTo("invoice-documents");
+            assertThat(env.getProperty("invoice.cors.allowed-origins")).isEqualTo("https://invoices.example.com");
         }
-        Map<String, Object> render = new HashMap<>();
-        render.put("SPRING_PROFILES_ACTIVE", RenderFreeDemoGuard.PROFILE);
-        render.put("INVOICE_DB_URL", "jdbc:postgresql://dpg-demo.example:5432/invoice_demo");
-        render.put("GEMINI_API_KEY", "test-only-value");
-        render.put("INVOICE_WORKER_ENABLED", "true");
-        render.put("INVOICE_STORAGE_DIR", "/var/data/invoice-documents");
-        try (ConfigurableApplicationContext context = startWithEnvironment(render)) {
-            Environment env = context.getEnvironment();
-            assertThat(env.getActiveProfiles()).containsExactly(RenderFreeDemoGuard.PROFILE);
-            assertThat(env.getProperty("gemini.api-key")).isEqualTo("test-only-value");   // the variable won
-            assertThatThrownBy(() -> RenderFreeDemoGuard.check(env))
-                    .hasMessageContaining("Gemini API key is set")
-                    .hasMessageContaining("invoice.worker.enabled must be false")
-                    .hasMessageContaining("invoice.storage.dir must be")
-                    .hasMessageNotContaining("test-only-value");
+        try (ConfigurableApplicationContext context = start()) {
+            assertThat(context.getEnvironment().getProperty("invoice.gemini.require-paid-tier")).isEqualTo("false");
         }
-        // The production profile is unchanged by the demo: still the disk folder, no demo marker.
-        try (ConfigurableApplicationContext context = start("--spring.profiles.active=render", url,
-                "--INVOICE_STORAGE_DIR=/var/data/invoice-documents")) {
+        try (ConfigurableApplicationContext context = start("--spring.profiles.active=live")) {
+            assertThat(context.getEnvironment().getProperty("invoice.gemini.require-paid-tier")).isEqualTo("true");
+        }
+    }
+
+    /** The temporary free-demo profile was removed: naming it loads no profile file, so nothing demo-specific applies. */
+    @Test
+    void theRemovedFreeDemoProfileLoadsNothingSpecial() {
+        try (ConfigurableApplicationContext context = start("--spring.profiles.active=render-free-demo")) {
             Environment env = context.getEnvironment();
             assertThat(env.getProperty("invoice.free-demo.profile-file-loaded")).isNull();
-            assertThat(RenderFreeDemoGuard.isActive(env)).isFalse();
-            RenderFreeDemoGuard.check(env);
+            assertThat(env.getProperty("invoice.free-demo.allowed-upload-sha256")).isNull();
+            // Without the render profile it would still bind to 127.0.0.1 only, so such a deploy cannot go live.
+            assertThat(env.getProperty("server.address")).isEqualTo("127.0.0.1");
         }
     }
 

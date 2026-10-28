@@ -1,15 +1,15 @@
 <#
 .SYNOPSIS
-    Builds the React-developer handoff ZIP for the TEMPORARY free demo API, after the owner has deployed it by hand.
+    Builds the React-developer handoff ZIP for the deployed API, after the owner has deployed it by hand.
 
 .DESCRIPTION
     Read-only towards the API: exactly ONE request, GET <ApiBaseUrl>/api/health. Never POST/PUT/PATCH/DELETE, never logs
     in, never creates users or records, never reads or asks for a secret.
 
-    The package is created only when the health check returns HTTP 200, the body is exactly {"status":"UP"} and the
-    response carries "X-Invoice-Demo: ephemeral-synthetic-only" (proving the render-free-demo profile answered).
-    A passing check proves ONLY that the application process answered - not the database schema, login, CSRF,
-    uploads or the other 46 routes.
+    The package is created only when the health check returns HTTP 200 and the body is exactly {"status":"UP"}, and the
+    response does NOT carry the retired "X-Invoice-Demo" header (which would mean the old cookie + CSRF demo build is
+    still deployed, so the Bearer-token guide would not match it). A passing check proves ONLY that the application
+    process answered - not the database schema, login, uploads, storage or the other 45 routes.
 
     Output (both under target/, which Git ignores; replaced on every run):
         target/react-handoff-package/      unpacked package
@@ -133,7 +133,7 @@ try {
     $detail = if ($status) { "HTTP $status" } else { $_.Exception.GetType().Name }
     Fail "health check failed ($detail)." @(
         'Render Dashboard -> the service -> Events: is the latest deploy "Live"?',
-        'Logs: the first ERROR / Caused by line (RenderFreeDemoGuard, SchemaSafetyGuard, placeholder, storage).',
+        'Logs: the first ERROR / Caused by line (SchemaSafetyGuard, StorageStartupCheck, placeholder, CORS origins).',
         'Is the URL the one shown in the Dashboard, and is the health check path /api/health?',
         'A service that spun down may need longer: rerun, or pass -TimeoutSeconds 240.')
 }
@@ -152,14 +152,14 @@ $demoHeader = $null
 foreach ($name in @($response.Headers.Keys)) {
     if ($name -ieq 'X-Invoice-Demo') { $demoHeader = (@($response.Headers[$name]) -join ',').Trim() }
 }
-if ($demoHeader -ne 'ephemeral-synthetic-only') {
-    Fail 'the response has no "X-Invoice-Demo: ephemeral-synthetic-only" header, so this is not the render-free-demo profile.' @(
-        'Render -> Environment: SPRING_PROFILES_ACTIVE must be exactly render-free-demo.',
-        'Never hand a production-profile service to a frontend developer as the demo.')
+if ($demoHeader) {
+    Fail 'the response carries the retired "X-Invoice-Demo" header: the old cookie + CSRF free-demo build is still deployed.' @(
+        'Merge and deploy the Bearer-token release first (docs/RENDER_DEPLOYMENT.md), then rerun this script.',
+        'The guide in this package describes Bearer tokens and would not match the old build.')
 }
-Write-Host 'Health check passed: HTTP 200, {"status":"UP"}, X-Invoice-Demo present.' -ForegroundColor Green
+Write-Host 'Health check passed: HTTP 200, {"status":"UP"}, no retired demo header.' -ForegroundColor Green
 $checkedAt  = $checkedAt + ' (UTC)'
-$resultText = 'Passed: HTTP 200, body {"status":"UP"}, header X-Invoice-Demo: ephemeral-synthetic-only'
+$resultText = 'Passed: HTTP 200, body {"status":"UP"}, no retired X-Invoice-Demo header'
 }
 
 # ------------------------------------------------------------------ 4. source files (must exist)
@@ -171,7 +171,7 @@ $sources = [ordered]@{
     'docs/react-handoff/README.md'                = 'docs/react-handoff/README.md'
     'docs/react-handoff/env.example'              = 'docs/react-handoff/env.example'
     'docs/react-handoff/vite.config.example.ts'   = 'docs/react-handoff/vite.config.example.ts'
-    'docs/react-handoff/demo-fixtures/README.md'  = 'docs/react-handoff/demo-fixtures/README.md'
+    'docs/react-handoff/sample-invoices/README.md' = 'docs/react-handoff/sample-invoices/README.md'
     'postman/Invoice-Process.postman_collection.json' = 'postman/Invoice-Process.postman_collection.json'
 }
 foreach ($relative in $sources.Keys) {
@@ -183,12 +183,9 @@ $collectionText = [System.IO.File]::ReadAllText((Join-Path $repoRoot 'postman/In
 $collection = $collectionText | ConvertFrom-Json
 if ($collection.PSObject.Properties['auth'] -and $collection.auth) { Fail 'the Postman collection has an auth block; remove it before sharing.' }
 foreach ($variable in @($collection.variable)) {
-    if ($variable.key -match 'pass|secret|token|apikey|api_key' -and $variable.key -ne 'xsrfToken' -and $variable.key -ne 'xsrfBeforeLogin' -and
-        -not [string]::IsNullOrEmpty([string]$variable.value)) {
+    # accessToken is filled only at run time by "00 - Login"; an exported copy must never contain one.
+    if ($variable.key -match 'pass|secret|token|apikey|api_key' -and -not [string]::IsNullOrEmpty([string]$variable.value)) {
         Fail "the Postman collection variable '$($variable.key)' has a value; clear it before sharing."
-    }
-    if ($variable.key -match '^xsrf' -and -not [string]::IsNullOrEmpty([string]$variable.value)) {
-        Fail "the Postman collection variable '$($variable.key)' has a stored value; clear it before sharing."
     }
 }
 foreach ($m in [regex]::Matches($collectionText, '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')) {
@@ -218,12 +215,12 @@ foreach ($relative in $sources.Keys) {
     Write-Utf8 (Join-Path $packageDir $sources[$relative]) $text
 }
 
-# The six synthetic upload fixtures: the only files the demo accepts. Copied BYTE-EXACT (not through the text path
-# above, which normalises line endings): their SHA-256 values are the demo's allowlist.
-$fixtureSource = Join-Path $repoRoot 'docs/react-handoff/demo-fixtures'
-$fixtures = @(Get-ChildItem -LiteralPath $fixtureSource -Filter 'synthetic-demo-invoice-*.pdf' | Sort-Object Name)
-if ($fixtures.Count -ne 6) { Fail "expected 6 synthetic demo fixtures in docs/react-handoff/demo-fixtures, found $($fixtures.Count)." }
-$fixtureTarget = Join-Path $packageDir 'docs/react-handoff/demo-fixtures'
+# The six synthetic sample invoices (examples only - the API accepts any valid PDF). Copied BYTE-EXACT, not through the
+# text path above, which normalises line endings and would corrupt a PDF.
+$fixtureSource = Join-Path $repoRoot 'docs/react-handoff/sample-invoices'
+$fixtures = @(Get-ChildItem -LiteralPath $fixtureSource -Filter 'synthetic-sample-invoice-*.pdf' | Sort-Object Name)
+if ($fixtures.Count -ne 6) { Fail "expected 6 synthetic sample invoices in docs/react-handoff/sample-invoices, found $($fixtures.Count)." }
+$fixtureTarget = Join-Path $packageDir 'docs/react-handoff/sample-invoices'
 foreach ($fixture in $fixtures) {
     $copy = Join-Path $fixtureTarget $fixture.Name
     Copy-Item -LiteralPath $fixture.FullName -Destination $copy
@@ -232,9 +229,9 @@ foreach ($fixture in $fixtures) {
     }
 }
 
-# Postman environment for the demo: base URL only, credentials always empty (typed in by the developer).
+# Postman environment for the deployed API: base URL only, credentials always empty (typed in by the developer).
 $environment = [ordered]@{
-    name   = 'Invoice Process - Render free demo'
+    name   = 'Invoice Process - Render'
     values = @(
         [ordered]@{ key = 'baseUrl';       value = $baseUrl; type = 'default'; enabled = $true },
         [ordered]@{ key = 'adminEmail';    value = '';       type = 'default'; enabled = $true },
@@ -242,7 +239,7 @@ $environment = [ordered]@{
     )
     _postman_variable_scope = 'environment'
 }
-Write-Utf8 (Join-Path $packageDir 'postman/Invoice-Process-Render-Free-Demo.postman_environment.json') `
+Write-Utf8 (Join-Path $packageDir 'postman/Invoice-Process-Render.postman_environment.json') `
     (($environment | ConvertTo-Json -Depth 5) + "`n")
 
 $report = @"
@@ -259,36 +256,37 @@ $report = @"
 
 ## What this proves - and what it does not
 
-It proves that the application process behind this URL was running the render-free-demo profile at the time above.
-It does NOT prove the database schema, login, CSRF, uploads, PDF storage or any of the other 46 routes. Those are
-checked by the React developer in the browser during integration (see the acceptance list in
-docs/REACT_DEVELOPER_HANDOFF.html, section 10).
+It proves that the application process behind this URL answered at the time above and was not the retired free-demo
+build. It does NOT prove the database schema, login, the Bearer flow, uploads, durable PDF storage, extraction or any
+of the other 45 routes. Those are checked by the React developer in the browser during integration (see "First
+integration session" and "Definition of done" in docs/REACT_DEVELOPER_HANDOFF.html).
 
 ## Reminders
 
-- Temporary demo: synthetic data only, accounts must end in @example.test.
-- PDFs are ephemeral; the Free database expires 30 days after it was created and has no backups.
-- Login credentials for the synthetic accounts are NOT in this package; they are shared separately.
+- Use only the test accounts and synthetic sample PDFs the backend owner provides; never real invoices in development.
+- Whether uploaded PDFs are durable and whether extraction runs depends on the server's configuration
+  (docs/RENDER_DEPLOYMENT.md) - ask the backend owner.
+- Login credentials are NOT in this package; they are shared separately. Never put an access token into a file.
 "@
 $selfTestBanner = ''
 if ($SelfTest) { $selfTestBanner = "> **SELF-TEST PACKAGE - NOT VERIFIED - DO NOT SHARE.** No service was contacted.`n`n" }
 Write-Utf8 (Join-Path $packageDir 'docs/HANDOFF_VERIFICATION.md') ($selfTestBanner + $report + "`n")
 
 $readme = @"
-Actify Invoice Process - React developer handoff (temporary free demo)
+Actify Invoice Process - React developer handoff (Bearer-token API)
 
 Open docs/REACT_DEVELOPER_HANDOFF.html in a browser. It works offline; all links are relative.
 
-  docs/REACT_DEVELOPER_HANDOFF.html   start here
-  docs/HANDOFF_VERIFICATION.md        what was checked, when, and what that does not prove
-  docs/REACT_BACKEND_HANDOFF.md       the complete contract (routes, JSON shapes, errors, flows)
-  docs/openapi.yaml                   the same contract as OpenAPI 3.0
-  docs/API_CONTRACT.md                pointer to the two files above
-  docs/react-handoff/                 project setup, API client, env and Vite proxy examples
-  docs/react-handoff/demo-fixtures/   the ONLY six PDFs the demo accepts for upload (synthetic)
-  postman/                            collection (partial coverage, not live-tested) + demo environment
+  docs/REACT_DEVELOPER_HANDOFF.html     start here
+  docs/HANDOFF_VERIFICATION.md          what was checked, when, and what that does not prove
+  docs/REACT_BACKEND_HANDOFF.md         the complete contract (routes, JSON shapes, errors, flows)
+  docs/openapi.yaml                     the same contract as OpenAPI 3.0
+  docs/API_CONTRACT.md                  pointer to the two files above
+  docs/react-handoff/                   project setup, env and Vite proxy examples
+  docs/react-handoff/sample-invoices/   six synthetic sample PDFs (examples only; any valid PDF is accepted)
+  postman/                              collection (partial coverage, not live-tested) + environment
 
-Synthetic data only. No credentials are included; they are shared separately.
+No credentials or tokens are included; they are shared separately.
 "@
 Write-Utf8 (Join-Path $packageDir 'README.txt') ($selfTestBanner.Replace('> **', '').Replace('**', '') + $readme + "`n")
 
@@ -330,6 +328,6 @@ Get-ChildItem -LiteralPath $packageDir -Recurse -File | Sort-Object FullName | F
 }
 Write-Host "ZIP: $zipPath"
 Write-Host ''
-Write-Host 'Reminder: the health check proves only that the process answered - not the database, login, CSRF or the other routes.' -ForegroundColor Yellow
-Write-Host 'Send synthetic demo credentials separately (never inside this ZIP).' -ForegroundColor Yellow
+Write-Host 'Reminder: the health check proves only that the process answered - not the database, login, storage or the other routes.' -ForegroundColor Yellow
+Write-Host 'Send test-account credentials separately (never inside this ZIP).' -ForegroundColor Yellow
 exit 0

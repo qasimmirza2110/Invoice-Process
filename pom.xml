@@ -25,6 +25,9 @@
 		     9.37.4 is the patched release of the same 9.x line (Apache-2.0, Java 7+ bytecode).
 		     Compatibility is proven by JwtCompatibilitySpikeTest. -->
 		<nimbus-jose-jwt.version>9.37.4</nimbus-jose-jwt.version>
+		<!-- AWS SDK for Java 2.x (Apache-2.0, Java 8+), used only as the S3 client for the private document bucket
+		     (Neon Object Storage). 2.55.16 was released 2026-10-13. -->
+		<aws-sdk.version>2.55.16</aws-sdk.version>
 	</properties>
 
 	<dependencyManagement>
@@ -33,6 +36,13 @@
 				<groupId>com.nimbusds</groupId>
 				<artifactId>nimbus-jose-jwt</artifactId>
 				<version>${nimbus-jose-jwt.version}</version>
+			</dependency>
+			<dependency>
+				<groupId>software.amazon.awssdk</groupId>
+				<artifactId>bom</artifactId>
+				<version>${aws-sdk.version}</version>
+				<type>pom</type>
+				<scope>import</scope>
 			</dependency>
 		</dependencies>
 	</dependencyManagement>
@@ -51,7 +61,44 @@
 			<artifactId>postgresql</artifactId>
 			<scope>runtime</scope>
 		</dependency>
-		<!-- Login, password hashing (BCrypt), CSRF and URL/role rules. -->
+		<!-- Upload check: an accepted file must really open as a PDF (PdfFiles), not just start with "%PDF-".
+		     Apache-2.0, Java 8+. commons-logging is replaced by Spring's spring-jcl, which provides the same API. -->
+		<dependency>
+			<groupId>org.apache.pdfbox</groupId>
+			<artifactId>pdfbox</artifactId>
+			<version>3.0.8</version>
+			<exclusions>
+				<exclusion>
+					<groupId>commons-logging</groupId>
+					<artifactId>commons-logging</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<!-- Original PDFs in a private S3-compatible bucket (S3DocumentStorage). Only the JDK's own HTTP client is used:
+		     the default Apache and Netty clients are excluded to keep the JAR and the dependency tree small. -->
+		<dependency>
+			<groupId>software.amazon.awssdk</groupId>
+			<artifactId>s3</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>software.amazon.awssdk</groupId>
+					<artifactId>apache-client</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>software.amazon.awssdk</groupId>
+					<artifactId>apache5-client</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>software.amazon.awssdk</groupId>
+					<artifactId>netty-nio-client</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>software.amazon.awssdk</groupId>
+			<artifactId>url-connection-client</artifactId>
+		</dependency>
+		<!-- Login, password hashing (BCrypt), Bearer-token authentication and URL/role rules. -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-security</artifactId>

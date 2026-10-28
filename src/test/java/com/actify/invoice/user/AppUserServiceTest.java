@@ -39,25 +39,17 @@ class AppUserServiceTest {
         service = new AppUserService(repository, encoder);
     }
 
+    /** No e-mail domain rule: any real business or webmail address works for every role. */
     @Test
-    void theFreeDemoAcceptsOnlySyntheticExampleTestAccounts() {
-        AppUserService demo = new AppUserService(repository, encoder, true);
-        assertThatThrownBy(() -> demo.createUser("owner@real-domain.example", "Owner", Role.ADMIN, "a-valid-password-1"))
-                .isInstanceOf(InvalidRequestException.class)
-                .hasMessageContaining("only synthetic @example.test");
-
-        when(repository.existsByEmail("vendor.one@example.test")).thenReturn(false);
+    void realEmailDomainsAreAcceptedForEveryRole() {
         when(repository.save(any(AppUser.class))).thenAnswer(invocation -> invocation.getArgument(0));
-        assertThat(demo.createUser(" Vendor.One@Example.TEST ", "Vendor One", Role.VENDOR, "a-valid-password-1")
-                .getEmail()).isEqualTo("vendor.one@example.test");
-    }
-
-    @Test
-    void outsideTheDemoRealDomainsStayAllowed() {
-        when(repository.existsByEmail("owner@company.example")).thenReturn(false);
-        when(repository.save(any(AppUser.class))).thenAnswer(invocation -> invocation.getArgument(0));
-        assertThat(service.createUser("owner@company.example", "Owner", Role.ADMIN, "a-valid-password-1").getEmail())
-                .isEqualTo("owner@company.example");
+        String[] addresses = {"owner@company.example", "accounts@vendor-firm.co.in", "reviewer.one@mail.example.org"};
+        Role[] roles = {Role.ADMIN, Role.VENDOR, Role.REVIEWER};
+        for (int i = 0; i < addresses.length; i++) {
+            when(repository.existsByEmail(addresses[i])).thenReturn(false);
+            assertThat(service.createUser(" " + addresses[i].toUpperCase() + " ", "User " + i, roles[i],
+                    "a-valid-password-1").getEmail()).isEqualTo(addresses[i]);
+        }
     }
 
     @Test

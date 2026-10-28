@@ -2,6 +2,7 @@ package com.actify.invoice.security;
 
 import com.actify.invoice.user.AppUser;
 import com.actify.invoice.user.AppUserRepository;
+import org.springframework.http.HttpHeaders;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
@@ -17,38 +18,42 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.Collections;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * Runs once per request: INVOICE_PROCESS_AUTH cookie -> verified JWT -> user row from the database -> "logged in".
+ * Runs once per request: "Authorization: Bearer <token>" header -> verified JWT -> user row from the database ->
+ * "logged in".
  *
- *  1. No cookie (or a public endpoint such as POST /api/auth/login): do nothing; the URL rules decide (usually 401).
- *  2. Cookie present: JwtTokenService checks signature, expiry, issuer and audience.
+ *  1. No Authorization header, another scheme (e.g. "Basic"), or a public endpoint such as POST /api/auth/login:
+ *     do nothing; the URL rules decide (usually 401).
+ *  2. "Bearer ..." present: JwtTokenService checks signature (HS256 only), expiry, issuer and audience.
  *  3. The user is re-read from app_users: it must exist, be enabled, and have the same token version as the
- *     token's "tv" claim. The ROLE comes from this row, never from the token or the browser.
- *  4. Anything wrong -> the cookie is deleted and the request gets a 401, before any controller runs.
+ *     token's "tv" claim. The ROLE comes from this row, never from the token or the client.
+ *  4. Anything wrong -> 401, before any controller runs.
  *
- * Why not Spring's oauth2ResourceServer() DSL? In Spring Security 5.7 it switches CSRF protection OFF for
- * every request where it finds a token. With a cookie the browser sends automatically, that would remove
- * CSRF protection exactly where it is needed. This filter only authenticates; CsrfFilter still checks
- * every POST/PUT/DELETE (see SecurityConfig and the CSRF tests).
+ * The header is the ONLY place a token is read from: never a cookie, a URL/query parameter or a request body. Because
+ * a browser never attaches this header on its own, another website cannot make a logged-in user's browser send an
+ * authenticated request - which is why CSRF protection is not needed (SecurityConfig).
  *
  * Not a @Component on purpose: Spring Boot would then also register it as a plain servlet filter.
  * SecurityConfig creates it and places it in the security filter chain.
  */
-public class JwtCookieAuthenticationFilter extends OncePerRequestFilter {
+public class JwtBearerAuthenticationFilter extends OncePerRequestFilter {
+
+    /** RFC 6750 "Bearer" is case-insensitive; the token itself is the JWT's three base64url parts. */
+    private static final Pattern BEARER = Pattern.compile("^Bearer +([A-Za-z0-9_.~+/-]+=*) *$", Pattern.CASE_INSENSITIVE);
+    private static final Pattern ANY_BEARER = Pattern.compile("^Bearer(\\s.*)?$", Pattern.CASE_INSENSITIVE);
 
     private final JwtTokenService tokenService;
     private final AppUserRepository userRepository;
-    private final AuthCookies authCookies;
     private final SecurityErrorWriter errorWriter;
     private final RequestMatcher publicRequests;
 
-    public JwtCookieAuthenticationFilter(JwtTokenService tokenService, AppUserRepository userRepository,
-                                         AuthCookies authCookies, SecurityErrorWriter errorWriter,
-                                         RequestMatcher publicRequests) {
+    public JwtBearerAuthenticationFilter(JwtTokenService tokenService, AppUserRepository userRepository,
+                                         SecurityErrorWriter errorWriter, RequestMatcher publicRequests) {
         this.tokenService = tokenService;
         this.userRepository = userRepository;
-        this.authCookies = authCookies;
         this.errorWriter = errorWriter;
         this.publicRequests = publicRequests;
     }
@@ -56,21 +61,24 @@ public class JwtCookieAuthenticationFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
-        String token = authCookies.readToken(request);
-        // Public pages ignore the cookie: an expired cookie must never block the login page itself.
-        if (token == null || publicRequests.matches(request)) {
+        String header = request.getHeader(HttpHeaders.AUTHORIZATION);
+        // Public endpoints ignore the header: an expired token must never block logging in again.
+        if (header == null || publicRequests.matches(request) || !ANY_BEARER.matcher(header.trim()).matches()) {
             chain.doFilter(request, response);
             return;
         }
 
         UsernamePasswordAuthenticationToken authentication;
         try {
-            authentication = authenticate(tokenService.decode(token));
+            Matcher matcher = BEARER.matcher(header.trim());
+            if (!matcher.matches()) {
+                throw new BadCredentialsException("Malformed bearer token");
+            }
+            authentication = authenticate(tokenService.decode(matcher.group(1)));
         } catch (JwtException | BadCredentialsException e) {
-            // Never log the token itself.
+            // Never log the token itself; the response does not say which check failed.
             SecurityContextHolder.clearContext();
-            authCookies.clear(request, response);
-            errorWriter.commence(request, response, new BadCredentialsException("Invalid session"));
+            errorWriter.commence(request, response, new BadCredentialsException("Invalid token"));
             return;
         }
         SecurityContextHolder.getContext().setAuthentication(authentication);

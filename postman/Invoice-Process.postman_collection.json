@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Invoice Process - API Verification",
-    "description": "Actify Invoice Process - API verification collection (API-only backend; no web pages are served).\n\nNOT LIVE-TESTED: this collection was rewritten on 2026-10-27 from the source code and the automated tests; it has\nnot yet been run against a running application.\n\nAuthentication: \"00 - Login\" first. GET /api/health (public) obtains the readable XSRF-TOKEN cookie; POST\n/api/auth/login sets the HttpOnly INVOICE_PROCESS_AUTH cookie and ROTATES the XSRF token. A collection-level test\nscript copies the current XSRF-TOKEN cookie into the collection variable xsrfToken after EVERY response, and the\ncollection pre-request script sends it as X-XSRF-TOKEN on every POST/PUT/PATCH/DELETE. CSRF is never disabled.\nSet adminEmail / adminPassword in the environment (a TEST admin only - never a real person's account).\n\nSafety:\n- Read-only, safe to repeat: 00, 01, 05, 07, 11 and 10a/10-0/10f/10g/10h.\n- WRITES data (no Gemini call): 02 (creates a batch and stores a PDF), 04 (records rejected files on that batch),\n  08 (stores a second PDF and closes the batch), 10b (new invoice version). Run them manually against a demo or\n  test database only.\n- No request calls Gemini. Extraction happens only in the server's background worker, which is OFF unless the\n  server owner enables it (INVOICE_WORKER_ENABLED + GEMINI_API_KEY + limits). Enabling it is a separate, approved\n  step; folders 03 and 09 then show extraction results, otherwise the invoices simply stay QUEUED.\n- The legacy POST /api/invoices/extract endpoint is not used: it answers 409 in the local demo and on Render.\n\nFiles: the PDF fixtures (samples/*, postman/fixtures/*) are NOT in the repository. Provide your own SYNTHETIC files\nunder those names and set Postman Settings > General > Working directory to the project folder. oversized.pdf must\nbe larger than 10 MB. No Gemini key is needed or stored here: the backend owns it.",
+    "description": "Actify Invoice Process - API verification collection (API-only backend; no web pages are served).\n\nNOT LIVE-TESTED: this collection was updated on 2026-10-28 for the Bearer-token release, from the source code and\nthe automated tests; it has not yet been run against a running application.\n\nAuthentication: \"00 - Login\" first. POST /api/auth/login returns {accessToken, tokenType: \"Bearer\", expiresIn,\nexpiresAt, user}; its test script stores accessToken in the collection variable accessToken (at run time only - the\nexported file keeps it empty). The collection pre-request script sends \"Authorization: Bearer {{accessToken}}\" on\nevery request that does not set its own Authorization header. No cookie and no CSRF header are used. Tokens expire\nafter 30 minutes: run \"00 - Login\" again.\nSet adminEmail / adminPassword in the environment (a TEST admin only - never a real person's account).\n\nSafety:\n- Read-only, safe to repeat: 00, 01, 05, 07, 11 and 10a/10-0/10f/10g/10h.\n- WRITES data (no Gemini call): 02 (creates a batch and stores a PDF), 04 (records rejected files on that batch),\n  08 (stores a second PDF and closes the batch), 10b (new invoice version). Run them manually against a demo or\n  test database only.\n- No request calls Gemini. Extraction happens only in the server's background worker, which is OFF unless the\n  server owner enables it (INVOICE_WORKER_ENABLED + GEMINI_API_KEY + limits). Enabling it is a separate, approved\n  step; folders 03 and 09 then show extraction results, otherwise the invoices simply stay QUEUED.\n- The legacy POST /api/invoices/extract endpoint is not used: it answers 409 in the local demo and on Render.\n\nFiles: folder 02 uploads docs/react-handoff/sample-invoices/synthetic-sample-invoice-01.pdf (synthetic, in the\nrepository; each vendor can upload it once). The other PDF fixtures (samples/*, postman/fixtures/*) are NOT in the\nrepository. Provide your own SYNTHETIC files under those names and set Postman Settings > General > Working directory to the project folder. oversized.pdf must\nbe larger than 10 MB. No Gemini key is needed or stored here: the backend owns it.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -10,11 +10,7 @@
       "value": "http://127.0.0.1:8088"
     },
     {
-      "key": "xsrfToken",
-      "value": ""
-    },
-    {
-      "key": "xsrfBeforeLogin",
+      "key": "accessToken",
       "value": ""
     },
     {
@@ -68,15 +64,11 @@
       "script": {
         "type": "text/javascript",
         "exec": [
-          "// CSRF: every unsafe request carries the CURRENT XSRF-TOKEN value as the X-XSRF-TOKEN header.",
-          "// xsrfToken is refreshed after every response (collection test script below), so the token rotated by",
-          "// login/logout is picked up automatically. The cookie jar value is the fallback.",
-          "const method = pm.request.method.toUpperCase();",
-          "if ([\"POST\", \"PUT\", \"PATCH\", \"DELETE\"].includes(method)) {",
-          "    const token = pm.collectionVariables.get(\"xsrfToken\") || pm.cookies.get(\"XSRF-TOKEN\");",
-          "    if (token) {",
-          "        pm.request.headers.upsert({ key: \"X-XSRF-TOKEN\", value: token });",
-          "    }",
+          "// Bearer authentication: every request sends the token from \"00 - Login\", unless the request sets its own",
+          "// Authorization header (e.g. the security test in folder 07). The token lives only in this run's variables.",
+          "const accessToken = pm.collectionVariables.get(\"accessToken\");",
+          "if (accessToken && !pm.request.headers.has(\"Authorization\")) {",
+          "    pm.request.headers.upsert({ key: \"Authorization\", value: \"Bearer \" + accessToken });",
           "}"
         ]
       }
@@ -86,11 +78,9 @@
       "script": {
         "type": "text/javascript",
         "exec": [
-          "// Keep the CSRF header in step with the server: login and logout issue a NEW XSRF-TOKEN cookie.",
-          "const currentXsrf = pm.cookies.get(\"XSRF-TOKEN\");",
-          "if (currentXsrf) {",
-          "    pm.collectionVariables.set(\"xsrfToken\", currentXsrf);",
-          "}",
+          "pm.test(\"[security] No cookie is ever set\", function () {",
+          "    pm.expect(pm.response.headers.has(\"Set-Cookie\")).to.be.false;",
+          "});",
           "pm.test(\"[security] No API key, auth header or stack trace in the response\", function () {",
           "    const text = pm.response.text();",
           "    pm.expect(text).to.not.match(/AIza[0-9A-Za-z_\\-]{20,}/);",
@@ -105,10 +95,10 @@
   "item": [
     {
       "name": "00 - Login (run first; needs adminEmail/adminPassword in the environment)",
-      "description": "Run first. 1) GET /api/health (public) sets the readable XSRF-TOKEN cookie. 2) POST /api/auth/login (needs X-XSRF-TOKEN) sets the HttpOnly INVOICE_PROCESS_AUTH cookie (30 min) and a NEW XSRF-TOKEN; the token is never in a body. 3) GET /api/auth/me. Use a TEST admin only.",
+      "description": "Run first. 1) GET /api/health (public). 2) POST /api/auth/login returns the Bearer access token in the JSON body (no cookie); the test script stores it in the collection variable accessToken for this run. 3) GET /api/auth/me with \"Authorization: Bearer\". Use a TEST admin only. Tokens expire after 30 minutes.",
       "item": [
         {
-          "name": "GET health (public; sets XSRF-TOKEN)",
+          "name": "GET health (public)",
           "event": [
             {
               "listen": "test",
@@ -116,9 +106,7 @@
                 "type": "text/javascript",
                 "exec": [
                   "pm.test(\"Status code is 200\", function () { pm.response.to.have.status(200); });",
-                  "pm.test(\"Health body is exactly {status: UP}\", function () { pm.expect(pm.response.json()).to.eql({ status: \"UP\" }); });",
-                  "pm.test(\"XSRF-TOKEN cookie is available before login\", function () { pm.expect(pm.cookies.has(\"XSRF-TOKEN\")).to.be.true; });",
-                  "pm.collectionVariables.set(\"xsrfBeforeLogin\", pm.cookies.get(\"XSRF-TOKEN\") || \"\");"
+                  "pm.test(\"Health body is exactly {status: UP}\", function () { pm.expect(pm.response.json()).to.eql({ status: \"UP\" }); });"
                 ]
               }
             }
@@ -130,7 +118,7 @@
           }
         },
         {
-          "name": "POST login (sets the HttpOnly auth cookie)",
+          "name": "POST login (returns the Bearer token)",
           "event": [
             {
               "listen": "test",
@@ -139,23 +127,17 @@
                 "exec": [
                   "pm.test(\"Status code is 200\", function () { pm.response.to.have.status(200); });",
                   "const body = pm.response.json();",
-                  "pm.test(\"Logged in as ADMIN\", function () { pm.expect(body.role).to.eql(\"ADMIN\"); });",
-                  "pm.test(\"The token is never in the response body\", function () { pm.expect(body).to.not.have.property(\"token\"); });",
-                  "pm.test(\"Login cookie is HttpOnly and SameSite=Strict\", function () {",
-                  "    const setCookie = pm.response.headers.all().filter(h => h.key.toLowerCase() === \"set-cookie\")",
-                  "        .map(h => h.value).join(\"\\n\");",
-                  "    pm.expect(setCookie).to.include(\"INVOICE_PROCESS_AUTH=\");",
-                  "    pm.expect(setCookie).to.include(\"HttpOnly\");",
-                  "    pm.expect(setCookie).to.include(\"SameSite=Strict\");",
+                  "pm.test(\"Bearer token response\", function () {",
+                  "    pm.expect(body.tokenType).to.eql(\"Bearer\");",
+                  "    pm.expect(body.accessToken).to.be.a(\"string\").and.not.empty;",
+                  "    pm.expect(body.expiresIn).to.be.above(0);",
                   "});",
-                  "// Login rotates the CSRF token. Save the NEW value now so the next write sends it (the collection test script",
-                  "// does the same after every response; this makes the login step explicit and testable).",
-                  "const rotated = pm.cookies.get(\"XSRF-TOKEN\");",
-                  "pm.test(\"Login issued a new XSRF-TOKEN\", function () {",
-                  "    pm.expect(rotated).to.be.a(\"string\").and.not.empty;",
-                  "    pm.expect(rotated).to.not.eql(pm.collectionVariables.get(\"xsrfBeforeLogin\"));",
+                  "pm.test(\"Logged in as ADMIN; no password data in the user\", function () {",
+                  "    pm.expect(body.user.role).to.eql(\"ADMIN\");",
+                  "    pm.expect(body.user).to.not.have.property(\"passwordHash\");",
                   "});",
-                  "pm.collectionVariables.set(\"xsrfToken\", rotated || \"\");"
+                  "// Kept for THIS run only. Never export the collection or an environment with a filled-in token.",
+                  "pm.collectionVariables.set(\"accessToken\", body.accessToken || \"\");"
                 ]
               }
             }
@@ -357,7 +339,7 @@
                 {
                   "key": "file",
                   "type": "file",
-                  "src": "samples/sample-invoice.pdf"
+                  "src": "docs/react-handoff/sample-invoices/synthetic-sample-invoice-01.pdf"
                 }
               ]
             },
@@ -631,7 +613,7 @@
                   "    pm.expect(r.accepted).to.eql(false);",
                   "    pm.expect(r.invoiceId).to.eql(null);",
                   "    pm.expect(r.code).to.eql(\"INVALID_FILE\");",
-                  "    pm.expect(r.message).to.include(\"not a valid PDF\");",
+                  "    pm.expect(r.message).to.be.a(\"string\").and.not.empty; // \"not a valid PDF\" or \"could not be opened as a PDF\"",
                   "});"
                 ]
               }
@@ -807,15 +789,15 @@
       "description": "Checks that client-supplied credentials and server internals are never reflected. Every request in the collection also runs the collection-level [security] test.",
       "item": [
         {
-          "name": "Auth header is not reflected",
+          "name": "Fake Bearer token is refused and not reflected",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"Status code is 404\", function () {",
-                  "    pm.response.to.have.status(404);",
+                  "pm.test(\"Status code is 401 (the fake token is refused before any controller runs)\", function () {",
+                  "    pm.response.to.have.status(401);",
                   "});",
                   "pm.test(\"Response is JSON\", function () {",
                   "    pm.response.to.be.json;",
@@ -823,11 +805,12 @@
                   "const body = pm.response.json();",
                   "pm.test(\"Error body has the standard shape\", function () {",
                   "    pm.expect(body).to.include.all.keys(\"timestamp\", \"status\", \"error\", \"message\", \"path\");",
-                  "    pm.expect(body.status).to.eql(404);",
-                  "    pm.expect(body.message).to.be.a(\"string\").and.not.empty;",
+                  "    pm.expect(body.status).to.eql(401);",
+                  "    pm.expect(body.error).to.eql(\"Unauthorized\");",
+                  "    pm.expect(body.message).to.eql(\"Please log in.\");",
                   "});",
-                  "pm.test(\"Error title is 'Invoice not found'\", function () {",
-                  "    pm.expect(body.error).to.eql(\"Invoice not found\");",
+                  "pm.test(\"WWW-Authenticate names the Bearer scheme without details\", function () {",
+                  "    pm.expect(pm.response.headers.get(\"WWW-Authenticate\")).to.eql(\"Bearer\");",
                   "});",
                   "pm.test(\"Fake credentials are not reflected in body or headers\", function () {",
                   "    const text = pm.response.text() + JSON.stringify(pm.response.headers.toObject());",

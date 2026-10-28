@@ -23,11 +23,12 @@ RUN mvn -B -q -DskipTests package \
 # ---------- runtime stage ----------
 FROM eclipse-temurin:17.0.20_8-jre-noble
 
-# Run as an unprivileged user. /var/data is the intended mount path of the Render persistent disk; the folder is
-# created here so the path also exists (empty, NOT persistent) when no disk is attached.
+# Run as an unprivileged user. Nothing is stored in the container: its filesystem is wiped on every deploy, restart
+# and spin-down, so the render profile keeps uploaded PDFs in the private S3-compatible bucket (INVOICE_S3_*) and
+# refuses to start without it (StorageStartupCheck).
 RUN groupadd --system invoice && useradd --system --gid invoice --home-dir /app --shell /usr/sbin/nologin invoice \
-    && mkdir -p /app /var/data/invoice-documents \
-    && chown -R invoice:invoice /app /var/data
+    && mkdir -p /app \
+    && chown -R invoice:invoice /app
 WORKDIR /app
 COPY --from=build --chown=invoice:invoice /workspace/app.jar /app/app.jar
 USER invoice

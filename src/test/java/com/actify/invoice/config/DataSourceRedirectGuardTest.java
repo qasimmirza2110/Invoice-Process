@@ -40,7 +40,7 @@ class DataSourceRedirectGuardTest {
                 });
     }
 
-    /** An approved non-test start (render / render-free-demo shape) with these extra OS environment variables. */
+    /** An approved non-test start (render shape) with these extra OS environment variables. */
     private static StandardEnvironment approvedStartWith(Map<String, Object> extraVariables) {
         Map<String, Object> variables = new HashMap<>();
         variables.put("SPRING_DATASOURCE_URL", APPROVED_URL);
@@ -51,7 +51,7 @@ class DataSourceRedirectGuardTest {
         StandardEnvironment environment = new StandardEnvironment();
         environment.getPropertySources().replace(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
                 new SystemEnvironmentPropertySource(StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME, variables));
-        environment.setActiveProfiles(RenderFreeDemoGuard.PROFILE);
+        environment.setActiveProfiles("render");
         return environment;
     }
 

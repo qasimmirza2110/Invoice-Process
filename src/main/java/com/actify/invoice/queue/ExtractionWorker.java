@@ -84,7 +84,10 @@ public class ExtractionWorker {
         }
     }
 
-    /** True when the background worker actually runs (enabled AND an API key AND limits configured). */
+    /**
+     * True when the background worker actually runs (enabled AND an API key AND limits configured AND the Gemini data
+     * policy allows sending documents - GeminiConfig).
+     */
     public boolean isRunning() {
         if (!enabled) {
             return false;
@@ -105,11 +108,24 @@ public class ExtractionWorker {
             }
             return false;
         }
+        // Same idea: an unconfirmed data policy leaves the queue untouched instead of failing every invoice.
+        if (!geminiConfig.isDocumentSendingAllowed()) {
+            if (!warnedNotConfigured) {
+                log.warn("Extraction worker is enabled but stays idle: {}", GeminiConfig.PAID_TIER_BLOCKED_REASON);
+                warnedNotConfigured = true;
+            }
+            return false;
+        }
         return true;
     }
 
     public boolean isEnabled() {
         return enabled;
+    }
+
+    /** False while a paid Gemini project is required but not confirmed (GeminiConfig). */
+    public boolean isDocumentSendingAllowed() {
+        return geminiConfig.isDocumentSendingAllowed();
     }
 
     /** Presence only - the key itself is never returned or logged. */
