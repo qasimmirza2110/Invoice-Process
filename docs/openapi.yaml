@@ -17,7 +17,7 @@ servers:
   - url: http://127.0.0.1:8088
     description: Local demo (loopback only)
   - url: https://invoice-process.onrender.com
-    description: Render service (check which release is deployed - see REACT_BACKEND_HANDOFF.md section 1.4)
+    description: 'Render service. 2026-10-28 anonymous probe matched this Bearer build; exact deployed commit unverified (REACT_BACKEND_HANDOFF.md section 1.4). CORS not enabled there yet - use the dev proxy.'
 security:
   - bearerAuth: []
 tags:
@@ -378,7 +378,7 @@ paths:
       tags: [admin]
       summary: 'Intake board - QUEUED/PROCESSING/NEEDS_REVIEW batch invoices, split needsAssignment/assigned (ADMIN)'
       responses:
-        '200': { description: OK, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/IntakeBoard' } } } }
   /api/admin/assignments:
     post:
       tags: [admin]
@@ -395,7 +395,7 @@ paths:
       tags: [admin]
       summary: 'Extraction worker and Gemini pacing status (ADMIN; key presence only)'
       responses:
-        '200': { description: OK, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/QueueStatus' } } } }
   /api/admin/users:
     get:
       tags: [admin]
@@ -457,19 +457,28 @@ paths:
       tags: [dashboard]
       summary: 'VENDOR dashboard (403 for other roles)'
       parameters: [ { $ref: '#/components/parameters/Days' } ]
-      responses: { '200': { $ref: '#/components/responses/Metrics' }, '403': { $ref: '#/components/responses/Error' } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/VendorDashboard' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
   /api/dashboard/reviewer:
     get:
       tags: [dashboard]
       summary: 'REVIEWER dashboard (403 for other roles)'
       parameters: [ { $ref: '#/components/parameters/Days' } ]
-      responses: { '200': { $ref: '#/components/responses/Metrics' }, '403': { $ref: '#/components/responses/Error' } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ReviewerDashboard' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
   /api/dashboard/admin:
     get:
       tags: [dashboard]
       summary: 'ADMIN dashboard (403 for other roles)'
       parameters: [ { $ref: '#/components/parameters/Days' } ]
-      responses: { '200': { $ref: '#/components/responses/Metrics' }, '403': { $ref: '#/components/responses/Error' } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/AdminDashboard' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
 
 components:
   securitySchemes:
@@ -491,9 +500,6 @@ components:
     User:
       description: The user after the change
       content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
-    Metrics:
-      description: Role-scoped metrics; every rate has numerator, denominator and definition
-      content: { application/json: { schema: { type: object, additionalProperties: true } } }
   schemas:
     Role: { type: string, enum: [VENDOR, REVIEWER, ADMIN] }
     InvoiceStatus:
@@ -788,3 +794,208 @@ components:
         displayName: { type: string }
         active: { type: boolean }
         createdAt: { type: string }
+    # ---- Dashboards (dashboard/DashboardService). Count maps hold only the statuses that occur: missing key = 0.
+    # Rates are fractions 0-1, or null when nothing can be divided. Card -> field: REACT_BACKEND_HANDOFF.md section 11a.
+    StatusCounts:
+      type: object
+      description: 'InvoiceStatus -> count; only statuses that occur are present (treat a missing key as 0)'
+      additionalProperties: { type: integer, format: int64 }
+    GeminiUsage:
+      type: object
+      properties:
+        calls: { type: integer, format: int64 }
+        reportedTotalTokens: { type: integer, format: int64 }
+        callsWithoutReportedTokens: { type: integer, format: int64 }
+        byDayAndModel:
+          type: array
+          items:
+            type: object
+            properties:
+              day: { type: string, format: date }
+              model: { type: string }
+              calls: { type: integer, format: int64 }
+              errors: { type: integer, format: int64 }
+              promptTokens: { type: integer, format: int64 }
+              outputTokens: { type: integer, format: int64 }
+              totalTokens: { type: integer, format: int64 }
+        definition: { type: string }
+    CorrectionMetric:
+      type: object
+      properties:
+        submissions: { type: integer }
+        fieldsCompared: { type: integer }
+        fieldsChanged: { type: integer }
+        rate: { type: number, nullable: true, description: 'fieldsChanged / fieldsCompared (0-1); null when nothing was compared' }
+        changesByField: { type: object, additionalProperties: { type: integer } }
+        definition: { type: string }
+    DashboardHeader:
+      type: object
+      properties:
+        timeZone: { type: string, example: Asia/Kolkata }
+        periodFirstDay: { type: string, format: date }
+        periodLastDay: { type: string, format: date }
+    VendorDashboard:
+      allOf:
+        - $ref: '#/components/schemas/DashboardHeader'
+        - type: object
+          properties:
+            statusCounts: { $ref: '#/components/schemas/StatusCounts' }
+            receivedToday: { type: integer, format: int64 }
+            receivedInPeriod: { type: integer, format: int64 }
+            batches: { type: integer, format: int64, description: 'Own batches, all time' }
+            recentFailures:
+              type: array
+              description: 'Up to 10 most recent FAILED invoices of this vendor'
+              items:
+                type: object
+                properties:
+                  invoiceId: { type: integer, format: int64 }
+                  fileName: { type: string }
+                  reason: { type: string, nullable: true }
+                  at: { type: string }
+            geminiUsage: { $ref: '#/components/schemas/GeminiUsage' }
+    ReviewerDashboard:
+      allOf:
+        - $ref: '#/components/schemas/DashboardHeader'
+        - type: object
+          properties:
+            assignedStatusCounts: { $ref: '#/components/schemas/StatusCounts' }
+            oldestWaitingSince: { type: string, nullable: true }
+            submittedInPeriod: { type: integer }
+            correctionsSavedInPeriod: { type: integer, format: int64 }
+            myCorrectionRate: { $ref: '#/components/schemas/CorrectionMetric' }
+    AdminDashboard:
+      allOf:
+        - $ref: '#/components/schemas/DashboardHeader'
+        - type: object
+          properties:
+            statusCounts: { $ref: '#/components/schemas/StatusCounts' }
+            legacyInvoices: { type: integer, format: int64 }
+            receivedToday: { type: integer, format: int64 }
+            queue:
+              type: object
+              properties:
+                workerEnabled: { type: boolean }
+                waitingForRetryOrDailyReset: { type: integer, format: int64 }
+                oldestQueuedSince: { type: string, nullable: true }
+                quota: { $ref: '#/components/schemas/QuotaStatus' }
+            reviewerWorkload:
+              type: array
+              description: 'One row per reviewer with open work, then always a last row "(not assigned)" (reviewerId null, no PENDING_APPROVAL key)'
+              items:
+                type: object
+                properties:
+                  reviewerId: { type: integer, format: int64, nullable: true }
+                  name: { type: string }
+                  displayName: { type: string, description: 'Older field name, same value as name' }
+                  NEEDS_REVIEW: { type: integer, format: int64 }
+                  PENDING_APPROVAL: { type: integer, format: int64 }
+            decisionsInPeriod:
+              type: object
+              properties:
+                PENDING_APPROVAL: { type: integer, format: int64 }
+                APPROVED: { type: integer, format: int64 }
+                REJECTED: { type: integer, format: int64 }
+                definition: { type: string }
+            quality:
+              type: object
+              properties:
+                automaticChecksPassed:
+                  type: object
+                  properties:
+                    extracted: { type: integer }
+                    passedAllChecks: { type: integer }
+                    rate: { type: number, nullable: true }
+                    definition: { type: string }
+                reviewReasons:
+                  type: object
+                  properties:
+                    counts: { type: object, additionalProperties: { type: integer, format: int64 } }
+                    definition: { type: string }
+                correctionRate: { $ref: '#/components/schemas/CorrectionMetric' }
+                accuracy:
+                  type: object
+                  description: 'Values stay null until a verified audit sample exists'
+                  properties:
+                    observedFieldMatchRate: { type: number, nullable: true }
+                    reviewerAgreement: { type: number, nullable: true }
+                    definition: { type: string }
+                medianExtractionSeconds:
+                  type: object
+                  properties:
+                    samples: { type: integer }
+                    value: { type: number, nullable: true, description: 'null below 20 successful calls' }
+                    definition: { type: string }
+            geminiUsage: { $ref: '#/components/schemas/GeminiUsage' }
+            usageByVendor:
+              type: array
+              items:
+                type: object
+                properties:
+                  vendorUserId: { type: integer, format: int64, nullable: true }
+                  vendorName: { type: string, nullable: true }
+                  calls: { type: integer, format: int64 }
+                  reportedTotalTokens: { type: integer, format: int64 }
+    QuotaStatus:
+      type: object
+      properties:
+        configured: { type: boolean }
+        configurationProblem: { type: string, nullable: true }
+        model: { type: string, nullable: true }
+        rpmLimit: { type: integer, nullable: true }
+        tpmLimit: { type: integer, nullable: true }
+        rpdLimit: { type: integer, nullable: true }
+        safetyMargin: { type: number }
+        requestsLastMinute: { type: integer, format: int64 }
+        inputTokensLastMinute: { type: integer, format: int64 }
+        requestsSinceDailyReset: { type: integer, format: int64 }
+        pausedUntil: { type: string, nullable: true }
+        nextDailyReset: { type: string, nullable: true }
+        estimatedInputTokensPerCall: { type: integer }
+    QueueStatus:
+      type: object
+      properties:
+        workerEnabled: { type: boolean }
+        workerRunning: { type: boolean }
+        geminiMode: { type: string, enum: [NOT_CONFIRMED, PAID, FREE_TIER_TEST, LOCAL_DEMO, CONFLICT], description: 'Data-policy mode of Gemini extraction (never secret)' }
+        geminiKeyConfigured: { type: boolean, description: 'Presence only, never the value' }
+        onlyInvoiceIds: { type: array, items: { type: integer, format: int64 } }
+        idleReason: { type: string, nullable: true }
+        quota: { $ref: '#/components/schemas/QuotaStatus' }
+    IntakeRow:
+      type: object
+      properties:
+        invoiceId: { type: integer, format: int64 }
+        fileName: { type: string }
+        batchId: { type: integer, format: int64, nullable: true }
+        vendorName: { type: string }
+        categoryCode: { type: string, nullable: true }
+        status: { $ref: '#/components/schemas/InvoiceStatus' }
+        stage: { type: string, enum: [WAITING_FOR_EXTRACTION, EXTRACTING, READY_FOR_REVIEW] }
+        uploadedAt: { type: string }
+        assignedReviewerId: { type: integer, format: int64, nullable: true }
+        assignedReviewerName: { type: string, nullable: true }
+        extractionAttempts: { type: integer, nullable: true }
+        blockedReason: { type: string, nullable: true }
+    IntakeBoard:
+      type: object
+      properties:
+        worker:
+          type: object
+          properties:
+            enabled: { type: boolean }
+            running: { type: boolean }
+            idleReason: { type: string, nullable: true }
+            onlyInvoiceIds: { type: array, items: { type: integer, format: int64 } }
+            onlyInvoiceIdsProblems: { type: array, items: { type: string } }
+        counts:
+          type: object
+          properties:
+            needsAssignment: { type: integer }
+            needsAssignmentWaitingForExtraction: { type: integer }
+            assigned: { type: integer }
+            assignedWaitingForExtraction: { type: integer }
+            assignedReadyForReview: { type: integer }
+        needsAssignment: { type: array, items: { $ref: '#/components/schemas/IntakeRow' } }
+        assigned: { type: array, items: { $ref: '#/components/schemas/IntakeRow' } }
+        definition: { type: string }

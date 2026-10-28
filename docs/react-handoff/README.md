@@ -35,6 +35,14 @@ relative paths. That avoids CORS entirely, and CORS is **closed by default** on 
 hosted on its own origin, the backend owner can allow that exact origin (`INVOICE_CORS_ALLOWED_ORIGINS`); then set
 `VITE_API_BASE_URL` to the API URL. Never ask for `*`.
 
+| Mode | `.env.local` | Needs from the backend owner |
+|---|---|---|
+| Dev proxy (use this) | `API_PROXY_TARGET=https://invoice-process.onrender.com`, `VITE_API_BASE_URL=` (empty) | nothing |
+| Direct calls | `VITE_API_BASE_URL=https://invoice-process.onrender.com` | your exact origin in `INVOICE_CORS_ALLOWED_ORIGINS` — none was set on 2026-10-28 |
+
+Dashboard cards and the exact JSON field behind each one: `REACT_DEVELOPER_HANDOFF.html`, section
+"Dashboard cards → JSON field" (missing status keys mean 0).
+
 ## 4. One API client for the whole app
 
 Use the client in `REACT_DEVELOPER_HANDOFF.html`, section **"The one API client"** — the only maintained copy, so it
