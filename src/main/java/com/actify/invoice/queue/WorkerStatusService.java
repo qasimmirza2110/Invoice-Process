@@ -42,9 +42,18 @@ public class WorkerStatusService {
         return quotaGuard.status();
     }
 
-    /** true when the worker may actually pick up jobs (enabled AND a key AND limits AND data policy). */
+    /** The data-policy mode (NOT_CONFIRMED, PAID, FREE_TIER_TEST, LOCAL_DEMO, CONFLICT) - never secret. */
+    public GeminiConfig.Mode geminiMode() {
+        return worker.getGeminiMode();
+    }
+
+    /**
+     * true when the worker may actually pick up jobs (enabled AND a key AND limits AND data policy AND not halted
+     * after the free-tier test's one call).
+     */
     public boolean isWorkerRunning(QuotaStatus quota) {
-        return worker.isEnabled() && worker.hasApiKey() && quota.isConfigured() && worker.isDocumentSendingAllowed();
+        return worker.isEnabled() && worker.hasApiKey() && quota.isConfigured() && worker.isDocumentSendingAllowed()
+                && worker.getHaltReason() == null;
     }
 
     /** Why queued jobs are not being processed right now, or null/the last pacing reason when the worker runs. */
@@ -58,7 +67,10 @@ public class WorkerStatusService {
             return "Extraction is not configured: GEMINI_API_KEY is not set, so the worker stays idle.";
         }
         if (!worker.isDocumentSendingAllowed()) {
-            return GeminiConfig.PAID_TIER_BLOCKED_REASON;
+            return worker.getDocumentSendingBlockedReason();
+        }
+        if (worker.getHaltReason() != null) {
+            return worker.getHaltReason();
         }
         if (!quota.isConfigured()) {
             return "Gemini limits are not configured: " + quota.getConfigurationProblem();

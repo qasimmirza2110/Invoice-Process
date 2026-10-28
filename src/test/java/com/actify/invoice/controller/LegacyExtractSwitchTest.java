@@ -14,16 +14,32 @@ import static org.mockito.Mockito.verify;
 
 /**
  * invoice.legacy-extract.enabled=false (the local demo): POST /api/invoices/extract is refused (409 via
- * GlobalExceptionHandler) before the service - and therefore Gemini - is ever called.
+ * GlobalExceptionHandler) before the service - and therefore Gemini - is ever called. The free-tier test refuses it
+ * too, even if the switch were on: it would send any uploaded file, outside the one allowlisted invoice.
  */
 class LegacyExtractSwitchTest {
+
+    private static MockMultipartFile pdf() {
+        return new MockMultipartFile("file", "x.pdf", "application/pdf", "%PDF-1.4".getBytes());
+    }
 
     @Test
     void aSwitchedOffLegacyEndpointNeverReachesTheServiceOrGemini() {
         InvoiceService service = mock(InvoiceService.class);
-        InvoiceController controller = new InvoiceController(service, mock(InvoiceAccessPolicy.class), false);
+        InvoiceController controller = new InvoiceController(service, mock(InvoiceAccessPolicy.class), false, false);
 
-        assertThatThrownBy(() -> controller.extract(new MockMultipartFile("file", "x.pdf", "application/pdf", "%PDF-1.4".getBytes())))
+        assertThatThrownBy(() -> controller.extract(pdf()))
+                .isInstanceOf(WorkflowConflictException.class)
+                .hasMessageContaining("switched off");
+        verify(service, never()).extractAndSave(any());
+    }
+
+    @Test
+    void theFreeTierTestBlocksTheLegacyEndpointEvenWhenItsSwitchIsOn() {
+        InvoiceService service = mock(InvoiceService.class);
+        InvoiceController controller = new InvoiceController(service, mock(InvoiceAccessPolicy.class), true, true);
+
+        assertThatThrownBy(() -> controller.extract(pdf()))
                 .isInstanceOf(WorkflowConflictException.class)
                 .hasMessageContaining("switched off");
         verify(service, never()).extractAndSave(any());

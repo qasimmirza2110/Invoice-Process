@@ -38,6 +38,11 @@ public interface ExtractionJobRepository extends JpaRepository<ExtractionJob, Lo
             + "and j.claimedAt < :cutoff")
     List<ExtractionJob> findStaleClaims(@Param("cutoff") LocalDateTime cutoff);
 
+    /** Same as findStaleClaims, but only among the named invoices (invoice.worker.only-invoice-ids). */
+    @Query("select j from ExtractionJob j where j.invoice.status = com.actify.invoice.entity.InvoiceStatus.PROCESSING "
+            + "and j.claimedAt < :cutoff and j.invoiceId in :ids")
+    List<ExtractionJob> findStaleClaimsAmong(@Param("cutoff") LocalDateTime cutoff, @Param("ids") Collection<Long> ids);
+
     /** Position in the queue (1 = next to start), counting only eligible-or-waiting QUEUED jobs ahead of this one. */
     @Query(value = "select count(*) from extraction_jobs j join invoices i on i.id = j.invoice_id "
             + "where i.status = 'QUEUED' and (j.queued_at < :queuedAt or (j.queued_at = :queuedAt and j.invoice_id < :invoiceId))",
