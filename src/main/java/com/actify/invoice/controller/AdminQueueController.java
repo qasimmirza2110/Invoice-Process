@@ -27,6 +27,7 @@ public class AdminQueueController {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("workerEnabled", workerStatus.isWorkerEnabled());
         result.put("workerRunning", workerStatus.isWorkerRunning(quota));
+        result.put("geminiMode", workerStatus.geminiMode().name());
         result.put("geminiKeyConfigured", workerStatus.isGeminiKeyConfigured()); // presence only, never the value
         result.put("onlyInvoiceIds", workerStatus.onlyInvoiceIds());
         result.put("idleReason", workerStatus.idleReason(quota));

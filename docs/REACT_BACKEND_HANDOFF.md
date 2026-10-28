@@ -5,17 +5,21 @@ the services they call) and the tests named below, for the **Bearer-token** rele
 `feature/bearer-jwt-real-uploads`). Every route and field here exists in that code. Examples use synthetic ids and values
 only. If this file and the code disagree, **the code wins** — please report the difference.
 
-> **Deployed or not?** The API URL stays **`https://invoice-process.onrender.com`** — this release replaces the code
-> behind that same service. But on 2026-10-28 that URL still ran the **older cookie + CSRF build** (free-demo profile).
+> **Deployed or not?** The API URL stays **`https://invoice-process.onrender.com`** — this release replaced the code
+> behind that same service. Observed on 2026-10-28 (anonymous requests only, no login): `GET /api/health` → 200
+> `{"status":"UP"}` and `GET /api/auth/me` → 401 with `WWW-Authenticate: Bearer`, which only the Bearer build sends.
+> So the Bearer build is **most likely live**; the exact deployed commit and the service's settings are **unverified**.
+> Confirm with one login (section 1.4) before relying on it.
 >
-> | | Live today (old build) | This document (target, after the owner deploys it) |
+> | | Older cookie build (before this release) | This document (Bearer build) |
 > |---|---|---|
 > | Login answer | `Set-Cookie: INVOICE_PROCESS_AUTH`, no token in the body | JSON with `accessToken`, no cookie |
 > | Every other call | cookie + `X-XSRF-TOKEN` header | `Authorization: Bearer <accessToken>` |
 > | Uploads | only six fixture PDFs, `@example.test` accounts | any valid PDF ≤ 10 MB |
 > | Stored PDFs | lost on every restart | kept in a private bucket (Neon Object Storage) |
 >
-> Build against the target. Check section 1.4 before you test against the live URL.
+> **CORS is not enabled on the live service** (2026-10-28: a preflight from `http://localhost:5173` got 401 without any
+> `Access-Control-*` header). Use the dev proxy (section 1.2) until the owner allows your exact origin.
 
 Machine-readable companion: [`openapi.yaml`](openapi.yaml) (OpenAPI 3.0, same routes and schemas).
 
@@ -84,6 +88,18 @@ malformed header, unknown/disabled user, token version changed. Tests: `AuthSecu
 injected script could read it. Consequence: a full page reload logs the user out; that is intended. Never put the token
 in a URL, never log it, never put any secret in a `VITE_*` variable (everything in `VITE_*` is public).
 
+Token-lifecycle options (the backend contract is the same for all; only the first is recommended):
+
+| Where React keeps the token | Survives reload | Readable by an injected script | Verdict |
+|---|---|---|---|
+| Memory (module variable / React context) | no — user logs in again | only while that script runs in the page | **use this** |
+| `sessionStorage` | yes, per tab | yes, can be copied out and reused until `expiresAt` | do not use |
+| `localStorage` | yes, all tabs, after browser restart | yes, same risk, longer exposure | do not use |
+| Cookie | – | – | not supported: the backend reads only the `Authorization` header |
+
+Lifecycle: keep `expiresAt`; optionally warn the user ~2 minutes before it; there is no refresh call, so on expiry (any
+401) forget the token and show login. Logout = forget the token; "log out everywhere" = `POST /api/auth/logout-all`.
+
 **Logout.** There is no server-side "log out this token" call: the frontend simply forgets its in-memory token.
 `POST /api/auth/logout-all` is the real server-side revocation — it raises the user's token version, so **every**
 token issued to that user so far (all tabs and devices) stops working on its next request.
@@ -95,6 +111,7 @@ token is 401, a write with a valid token needs no other header).
 
 ```js
 // api.js - the single fetch wrapper every component uses
+const BASE = import.meta.env.VITE_API_BASE_URL ?? '';   // EMPTY = same origin / dev proxy
 let accessToken = null;                       // memory only
 export const setToken = (t) => { accessToken = t; };
 export const clearToken = () => { accessToken = null; };
@@ -104,7 +121,7 @@ export async function api(path, { method = 'GET', json, form, signal } = {}) {
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
   if (json !== undefined) headers['Content-Type'] = 'application/json';
   // For FormData do NOT set Content-Type: the browser adds it with the multipart boundary.
-  const res = await fetch(path, { method, headers, signal,
+  const res = await fetch(BASE + path, { method, headers, signal,
     body: json !== undefined ? JSON.stringify(json) : form });
   if (res.status === 401 && accessToken) { clearToken(); onSessionEnded(); }
   return res;
@@ -149,6 +166,14 @@ path) get CORS headers: methods `GET, POST, PUT`, request headers `Authorization
 `Content-Disposition`, **no credentials** (nothing to send — there are no cookies). An invalid entry stops the backend
 from starting. Tests: `CorsWebTest`. React then calls the absolute API URL (e.g. `VITE_API_BASE_URL`, a public value).
 
+| Mode | React `.env.local` | Backend setting needed |
+|---|---|---|
+| Dev proxy (recommended, works today) | `API_PROXY_TARGET=https://invoice-process.onrender.com` (or `http://127.0.0.1:8088` for a local backend), `VITE_API_BASE_URL=` (empty) | none |
+| Direct calls from another origin | `VITE_API_BASE_URL=https://invoice-process.onrender.com` | owner sets `INVOICE_CORS_ALLOWED_ORIGINS=<that exact origin>`, e.g. `http://localhost:5173` or the real frontend URL — **not set on the live service as of 2026-10-28** |
+
+The production frontend domain is not known yet; it must be added by the owner as an exact origin when it exists.
+Never put a database URL, the JWT secret, storage keys or API keys in any React variable.
+
 ### 1.3 Migration from the cookie release
 
 | Before (≤ 2026-10-27) | Now |
@@ -164,7 +189,8 @@ from starting. Tests: `CorsWebTest`. React then calls the absolute API URL (e.g.
 
 `POST /api/auth/login` with valid credentials: a body containing `"accessToken"` = this release. A body without it and a
 `Set-Cookie: INVOICE_PROCESS_AUTH` header (or a 403 "Missing or invalid CSRF token" when no CSRF header was sent) = the
-older cookie build — ask the backend owner to deploy this release first.
+older cookie build — ask the backend owner to deploy this release first. Without credentials: an anonymous
+`GET /api/auth/me` answering 401 **with** `WWW-Authenticate: Bearer` indicates this release (observed 2026-10-28).
 
 ---
 
@@ -213,10 +239,11 @@ data (disable the button while it is pending). "Tests" lists the test classes th
 Numbers are kept from the previous edition; #3 (`POST /api/auth/logout`) was removed.
 
 **Verification status (2026-10-28), the same for every route below:** verified against the **local code and its
-automated tests** (`./mvnw -o clean package`, 331 tests green). **Not verified live**: the new build is not deployed
-yet, so none of these routes has been exercised against `https://invoice-process.onrender.com` with Bearer tokens or
-the Neon database/bucket. That URL currently serves the older cookie contract (top of this document). This section
-becomes "verified live" only after the post-deploy checks in `RENDER_DEPLOYMENT.md` section 9 pass.
+automated tests** (`./mvnw -o test`, 333 tests green) and a local run against the Neon database and bucket (owner's
+API smoke test: login, batch, upload 202, duplicate/damaged 422, PDF download, 401, cross-vendor 404). **Not verified
+live** beyond the anonymous checks at the top of this document: no authenticated call has been made against
+`https://invoice-process.onrender.com` yet. This section becomes "verified live" only after the post-deploy checks in
+`RENDER_DEPLOYMENT.md` section 9 pass.
 
 ### 3.1 Health and session
 
@@ -336,7 +363,7 @@ saved in between — reload). Versions are immutable; history is never rewritten
 | 40 | `POST /api/invoices/{id}/send-back` | `ApprovalController.sendBack` | yes | `{"reason":"required"}` | 200 (`NEEDS_REVIEW`) | only from `PENDING_APPROVAL` (409) | same |
 | 41 | `POST /api/invoices/{id}/reopen` | `ApprovalController.reopen` | yes | `{"reason":"required"}` | 200 (`NEEDS_REVIEW`) | only from `APPROVED`/`REJECTED` | same |
 | 42 | `POST /api/invoices/{id}/requeue` | `ApprovalController.requeue` | yes | `{"reason":"required"}` | 200 (`QUEUED`) | only a `FAILED` batch invoice | same |
-| 43 | `GET /api/admin/queue/status` | `AdminQueueController.status` | – | – | 200 `{workerEnabled, workerRunning, geminiKeyConfigured, onlyInvoiceIds, idleReason, quota}` | `geminiKeyConfigured` = presence only | `DailyQuotaPgIntegrationTest` |
+| 43 | `GET /api/admin/queue/status` | `AdminQueueController.status` | – | – | 200 `{workerEnabled, workerRunning, geminiMode, geminiKeyConfigured, onlyInvoiceIds, idleReason, quota}` | `geminiKeyConfigured` = presence only | `DailyQuotaPgIntegrationTest` |
 | 44 | `POST /api/invoices/extract` | `InvoiceController.extract` | yes | multipart `file` | 201 `Invoice` — **legacy** single-file extraction, calls Gemini synchronously | 400 file rules, 409 switched off (`invoice.legacy-extract.enabled=false`: local demo and default in `render`), 422 validation, 429 quota, 502 provider | `InvoiceControllerTest`, `LegacyExtractSwitchTest`, `InvoiceRouteProtectionWebTest` |
 
 Every decision writes an append-only `invoice_workflow_events` row (who, when, from/to status, version, reason).
@@ -351,7 +378,65 @@ Every decision writes an append-only `invoice_workflow_events` row (who, when, f
 
 Each response is a JSON object of metrics already scoped to the caller; every rate comes with numerator, denominator
 and a `definition` text. Accuracy is never inferred (`observedFieldMatchRate` / `reviewerAgreement` stay unavailable
-until an audit sample exists). Tests: `DashboardPgIntegrationTest`, `DashboardMetricsTest`.
+until an audit sample exists). Tests: `DashboardPgIntegrationTest`, `DashboardMetricsTest`. Source:
+`dashboard/DashboardService`. Which card shows which field: section 11a.
+
+**Missing keys mean 0.** `statusCounts` / `assignedStatusCounts` contain only the statuses that occur (an empty object
+when there are none), and the last `reviewerWorkload` row ("(not assigned)") has no `PENDING_APPROVAL` key. Always read
+counts as `value ?? 0`. Rates are fractions 0–1 (multiply by 100 to display) or `null` when there is nothing to divide.
+
+```jsonc
+// Common header of all three
+{ "timeZone": "Asia/Kolkata", "periodFirstDay": "2026-10-22", "periodLastDay": "2026-10-28", ... }
+
+// GET /api/dashboard/vendor (own invoices only)
+{ ...header,
+  "statusCounts": { "QUEUED": 2, "APPROVED": 1 },  // InvoiceStatus -> count, own invoices
+  "receivedToday": 1, "receivedInPeriod": 3,        // invoices created today / in the period
+  "batches": 4,                                     // own batches, all time
+  "recentFailures": [ { "invoiceId": 41, "fileName": "inv-001.pdf", "reason": "...", "at": "2026-10-28T09:00:00" } ], // max 10
+  "geminiUsage": { "calls": 0, "reportedTotalTokens": 0, "callsWithoutReportedTokens": 0,
+                   "byDayAndModel": [ { "day": "2026-10-28", "model": "...", "calls": 0, "errors": 0,
+                                        "promptTokens": 0, "outputTokens": 0, "totalTokens": 0 } ],
+                   "definition": "..." } }
+
+// GET /api/dashboard/reviewer (invoices assigned to me)
+{ ...header,
+  "assignedStatusCounts": { "NEEDS_REVIEW": 2 },
+  "oldestWaitingSince": "2026-10-27T10:00:00",       // null when nothing waits
+  "submittedInPeriod": 1, "correctionsSavedInPeriod": 3,
+  "myCorrectionRate": { "submissions": 1, "fieldsCompared": 22, "fieldsChanged": 1, "rate": 0.045,
+                        "changesByField": { "taxAmount": 1 }, "definition": "..." } }
+
+// GET /api/dashboard/admin (all workflow invoices)
+{ ...header,
+  "statusCounts": { "QUEUED": 3 }, "legacyInvoices": 0, "receivedToday": 2,
+  "queue": { "workerEnabled": false, "waitingForRetryOrDailyReset": 0, "oldestQueuedSince": "2026-10-28T09:12:00",
+             "quota": { /* QuotaStatus, as in GET /api/admin/queue/status */ } },
+  "reviewerWorkload": [ { "reviewerId": 7, "name": "Reviewer Seven", "displayName": "Reviewer Seven", "NEEDS_REVIEW": 2, "PENDING_APPROVAL": 1 },
+                        { "reviewerId": null, "name": "(not assigned)", "displayName": "(not assigned)", "NEEDS_REVIEW": 0 } ],
+  "decisionsInPeriod": { "PENDING_APPROVAL": 0, "APPROVED": 0, "REJECTED": 0, "definition": "..." },
+  "quality": {
+    "automaticChecksPassed": { "extracted": 0, "passedAllChecks": 0, "rate": null, "definition": "..." },
+    "reviewReasons": { "counts": { "TOTAL_MISMATCH": 1 }, "definition": "..." },
+    "correctionRate": { /* same shape as myCorrectionRate */ },
+    "accuracy": { "observedFieldMatchRate": null, "reviewerAgreement": null, "definition": "..." },
+    "medianExtractionSeconds": { "samples": 0, "value": null, "definition": "..." } },  // value null below 20 samples
+  "geminiUsage": { /* same shape as vendor */ },
+  "usageByVendor": [ { "vendorUserId": 3, "vendorName": "Vendor Three", "calls": 2, "reportedTotalTokens": 4100 } ] }
+
+// QuotaStatus (queue.quota above, and "quota" in GET /api/admin/queue/status)
+{ "configured": false, "configurationProblem": "...", "model": "...", "rpmLimit": null, "tpmLimit": null, "rpdLimit": null,
+  "safetyMargin": 0.8, "requestsLastMinute": 0, "inputTokensLastMinute": 0, "requestsSinceDailyReset": 0,
+  "pausedUntil": null, "nextDailyReset": "2026-10-29T12:30:00", "estimatedInputTokensPerCall": 0 }
+// GET /api/admin/queue/status
+{ "workerEnabled": false, "workerRunning": false, "geminiMode": "NOT_CONFIRMED", "geminiKeyConfigured": false,
+  "onlyInvoiceIds": [],
+  "idleReason": "...", "quota": { /* QuotaStatus */ } }
+```
+
+With extraction switched off (the default), nothing leaves `QUEUED`: the review, approval and quality numbers stay 0 or
+`null`. That is correct data, not an error.
 
 ---
 
@@ -514,11 +599,20 @@ server's answer.
 - `PUT /api/admin/categories/{code}/active` has no HTTP-level test yet.
 - Cross-origin hosting needs the backend owner to set `INVOICE_CORS_ALLOWED_ORIGINS` (section 1.2).
 - Extraction runs only where the owner has enabled the worker **and** confirmed a paid Gemini project
-  (`INVOICE_GEMINI_PAID_TIER_CONFIRMED=true`). Otherwise uploads stay `QUEUED` and `GET /api/admin/queue/status`
+  (`INVOICE_GEMINI_PAID_TIER_CONFIRMED=true`), or for a free-tier test of one allowlisted, authorized, non-confidential invoice
+  (`geminiMode=FREE_TIER_TEST`, see `docs/RENDER_DEPLOYMENT.md` 4.2). Otherwise uploads stay `QUEUED` and `GET /api/admin/queue/status`
   explains why in `idleReason` — that is not a bug.
 - The Bearer flow is tested in the repository (MockMvc + PostgreSQL integration tests), **not yet against a deployed
   service** (see the note at the top).
 - Cloud pickers: frontend work, not live-tested.
+- Not supported by the API (do not build these as working features; ask the backend owner first): change or reset
+  password, self-registration, deleting users / batches / invoices (disable a user instead), renaming a category,
+  filtering invoices by vendor, date range or free text, several statuses in one list call (call once per status),
+  a total count for lists, a server-side "retry" for a vendor (vendor "Retry failed files" = re-send the rows that got
+  no response, 429 or 5xx; requeuing a `FAILED` invoice is ADMIN-only), a separate download route (download = fetch
+  the PDF blob and use `<a download>`).
+- While extraction is off, the reviewer queue, approvals, failed list and quality cards stay empty on the live
+  service: build those screens against the documented shapes.
 
 ## 10. Compatibility history (still relevant to existing clients)
 
@@ -567,3 +661,79 @@ screen part calls:
 | Admin "Approved and rejected" — reopen with reason | `GET /api/invoices?status=APPROVED` / `REJECTED`, `POST /api/invoices/{id}/reopen` |
 | Admin "Users" — create, rename, role, disable, reviewer categories | `GET/POST /api/admin/users`, `PUT …/{id}/display-name`, `…/role`, `…/enabled`, `GET/PUT …/{id}/categories` |
 | Admin "Categories" — add, deactivate | `GET/POST /api/admin/categories`, `PUT /api/admin/categories/{code}/active` |
+
+## 11a. Dashboard cards → endpoint → JSON field
+
+Every card below exists on the reference screens; the field is the exact JSON path in the response (section 3.6).
+`?? 0` = the key may be missing (section 3.6). Each dashboard answers **403** to the other two roles.
+
+**Vendor "This week" — `GET /api/dashboard/vendor?days=7` (VENDOR)**
+
+| Card | JSON field |
+|---|---|
+| Received today | `receivedToday` |
+| Received this week | `receivedInPeriod` |
+| Queued | `statusCounts.QUEUED ?? 0` |
+| Being reviewed | `(statusCounts.NEEDS_REVIEW ?? 0) + (statusCounts.PENDING_APPROVAL ?? 0)` |
+| Approved | `statusCounts.APPROVED ?? 0` |
+| Failed | `statusCounts.FAILED ?? 0` |
+| Gemini calls | `geminiUsage.calls` |
+| Tokens reported | `geminiUsage.reportedTotalTokens` |
+| "Business days in Asia/Kolkata" note | `timeZone`, `periodFirstDay`, `periodLastDay` |
+
+Available but not on a reference card: `statusCounts.PROCESSING`, `statusCounts.REJECTED`, `batches`,
+`recentFailures[]`.
+
+**Reviewer "Today" — `GET /api/dashboard/reviewer?days=1` (REVIEWER)**
+
+| Card | JSON field |
+|---|---|
+| Needs my review | `assignedStatusCounts.NEEDS_REVIEW ?? 0` (note: `assignedStatusCounts`, not `statusCounts`) |
+| Waiting for approval | `assignedStatusCounts.PENDING_APPROVAL ?? 0` |
+| Submitted today | `submittedInPeriod` ("today" only because `days=1`) |
+| Corrections saved today | `correctionsSavedInPeriod` |
+| Oldest waiting since | `oldestWaitingSince` (date-time or `null` → show "—") |
+
+**Admin "Dashboard" — `GET /api/dashboard/admin?days=7` (ADMIN; period selector = `days` 1–90)**
+
+| Card / block | JSON field |
+|---|---|
+| Received today | `receivedToday` |
+| Queued | `statusCounts.QUEUED ?? 0` |
+| Extracting | `statusCounts.PROCESSING ?? 0` |
+| Waiting (retry / daily reset) | `queue.waitingForRetryOrDailyReset` |
+| Failed | `statusCounts.FAILED ?? 0` |
+| Needs review | `statusCounts.NEEDS_REVIEW ?? 0` |
+| Waiting for approval | `statusCounts.PENDING_APPROVAL ?? 0` |
+| Approved | `statusCounts.APPROVED ?? 0` |
+| Rejected | `statusCounts.REJECTED ?? 0` |
+| Queue and Gemini pacing: Model | `queue.quota.model` |
+| Requests last minute | `queue.quota.requestsLastMinute` + `" / " + queue.quota.rpmLimit` when the limit is not `null` |
+| Input tokens last minute | `queue.quota.inputTokensLastMinute` / `queue.quota.tpmLimit` |
+| Requests since daily reset | `queue.quota.requestsSinceDailyReset` / `queue.quota.rpdLimit` |
+| Next daily reset (server time) | `queue.quota.nextDailyReset` |
+| Oldest queued since | `queue.oldestQueuedSince` (`null` → "—") |
+| Reviewer workload table | `reviewerWorkload[]`: `name`, `NEEDS_REVIEW ?? 0`, `PENDING_APPROVAL ?? 0`; last row is "(not assigned)" |
+| Passed all automatic checks | `quality.automaticChecksPassed.rate` (%), "of" `quality.automaticChecksPassed.extracted` |
+| Correction rate (fields edited) | `quality.correctionRate.rate` (%), `fieldsChanged` of `fieldsCompared` |
+| Median extraction time | `quality.medianExtractionSeconds.value` (`null` → "— (needs 20 calls)") |
+| Approved in period | `decisionsInPeriod.APPROVED` |
+| Rejected in period | `decisionsInPeriod.REJECTED` |
+| Definition bullets under the quality cards | each block's `definition` |
+| Gemini usage per day | `geminiUsage.byDayAndModel[]`: `day`, `model`, `calls`, `errors`, `promptTokens`, `outputTokens`, `totalTokens` |
+| Gemini usage per vendor | `usageByVendor[]`: `vendorName`, `calls`, `reportedTotalTokens` |
+| Worker on/off and why idle (optional status line) | `GET /api/admin/queue/status` → `workerEnabled`, `workerRunning`, `idleReason` |
+
+**Admin "Intake & assignment" — `GET /api/admin/intake` (ADMIN)**
+
+| Card / block | JSON field |
+|---|---|
+| Needs a reviewer | `counts.needsAssignment` |
+| …of which waiting for extraction | `counts.needsAssignmentWaitingForExtraction` |
+| Assigned, waiting for extraction | `counts.assignedWaitingForExtraction` |
+| Assigned, ready for review | `counts.assignedReadyForReview` |
+| "Needs a reviewer" / "Assigned" tables | `needsAssignment[]` / `assigned[]`: `invoiceId`, `fileName`, `batchId`, `vendorName`, `categoryCode`, `status`, `stage` (`WAITING_FOR_EXTRACTION` / `EXTRACTING` / `READY_FOR_REVIEW`), `uploadedAt`, `assignedReviewerId`, `assignedReviewerName`, `extractionAttempts`, `blockedReason` |
+| Worker note above the tables | `worker.enabled`, `worker.running`, `worker.idleReason` |
+
+Lists that are not dashboard cards (approvals, failed, decided, reviewer queue) come from `GET /api/invoices?status=…`
+(section 11). Never compute a card yourself from a list: lists are paged and have no total.

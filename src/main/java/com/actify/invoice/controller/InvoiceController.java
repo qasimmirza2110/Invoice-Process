@@ -27,18 +27,22 @@ public class InvoiceController {
     private final InvoiceService invoiceService;
     private final InvoiceAccessPolicy accessPolicy;
     private final boolean legacyExtractEnabled;
+    private final boolean freeTierTest;
 
     public InvoiceController(InvoiceService invoiceService, InvoiceAccessPolicy accessPolicy,
-                             @Value("${invoice.legacy-extract.enabled:true}") boolean legacyExtractEnabled) {
+                             @Value("${invoice.legacy-extract.enabled:true}") boolean legacyExtractEnabled,
+                             @Value("${invoice.gemini.free-tier-test-confirmed:false}") boolean freeTierTest) {
         this.invoiceService = invoiceService;
         this.accessPolicy = accessPolicy;
         this.legacyExtractEnabled = legacyExtractEnabled;
+        this.freeTierTest = freeTierTest;
     }
 
     @PostMapping(value = "/extract", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<InvoiceResponse> extract(@RequestParam("file") MultipartFile file) {
-        // Off in the local demo: it would call Gemini for any file, outside the worker's invoice allowlist (409).
-        if (!legacyExtractEnabled) {
+        // Off in the local demo and always in the free-tier test (SchemaSafetyGuard also refuses that combination):
+        // it would call Gemini for any file, outside the worker's invoice allowlist (409).
+        if (!legacyExtractEnabled || freeTierTest) {
             throw new WorkflowConflictException("The legacy single-file extraction is switched off here. Vendors upload "
                     + "PDFs on their page; the extraction worker processes them.");
         }

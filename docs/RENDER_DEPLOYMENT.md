@@ -30,7 +30,7 @@ binds to `127.0.0.1`, fails Render's health check, and Render keeps the old vers
 | G2 Schema in the new database | rehearsed script, not applied | `docs/sql/invoice-process-bootstrap-schema.sql` once on the Neon database (5.3) |
 | G3 Backups | **open** | Neon Free: 6-hour restore window for the database, no object versioning (section 6). Real invoices need a paid plan with real backups, rehearsed |
 | G4 Secrets | open | JWT secret, DB password, S3 secret, Gemini key only as Render secret values; the old local Gemini key rotated |
-| G5 Gemini data terms | open | Extraction of real invoices only with a **paid** Gemini API project (section 4.1); until then nothing is sent |
+| G5 Gemini data terms | open | Extraction of real invoices only with a **paid** Gemini API project (section 4.1); until then nothing is sent. A one-invoice free-tier test with an authorized, non-confidential PDF is possible separately (4.2) |
 | G6 Frontend origin | open | React same-origin / dev proxy, **or** its exact origin in `INVOICE_CORS_ALLOWED_ORIGINS` |
 | G7 Post-deploy checks | open | Section 9 passes on the live URL |
 | G8 Retention & access | open | Owner/legal decision (6.3) |
@@ -127,7 +127,7 @@ image build - watch its log.
 | `INVOICE_S3_SECRET_ACCESS_KEY` | yes | **yes** | Neon credential secret (shown once) |
 | `INVOICE_CORS_ALLOWED_ORIGINS` | no | no | empty = no CORS. Otherwise exact origins, comma-separated, no `*`, no path |
 | `INVOICE_BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` | first start on an empty DB only | **yes** (password) | creates the first ADMIN; remove both after the first login |
-| `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_LIMIT_RPM/TPM/RPD`, `GEMINI_INITIAL_TOKEN_ESTIMATE`, `INVOICE_GEMINI_PAID_TIER_CONFIRMED`, `INVOICE_WORKER_ENABLED` | **leave unset** for this release | key = yes | extraction stays off (4.1) |
+| `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_LIMIT_RPM/TPM/RPD`, `GEMINI_INITIAL_TOKEN_ESTIMATE`, `INVOICE_GEMINI_PAID_TIER_CONFIRMED`, `INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED`, `INVOICE_WORKER_ENABLED`, `INVOICE_WORKER_ONLY_INVOICE_IDS` | **leave unset** for this release | key = yes | extraction stays off (4.1); the one-invoice free-tier test sets them only for its duration (4.2) |
 
 **Remove** (no longer read): `INVOICE_STORAGE_DIR`, `INVOICE_STORAGE_EPHEMERAL_ACCEPTED`, `INVOICE_COOKIE_SECURE`,
 `INVOICE_FREE_DEMO_ALLOWED_UPLOAD_SHA256` - but only **after** the new release is verified, so a rollback still has
@@ -146,6 +146,116 @@ proof. Until it is set (and the worker variables), uploads stay `QUEUED`, `GET /
 `idleReason`, and the Gemini client refuses to send anything (`GeminiDataPolicyTest`). To enable later: in Google Cloud
 Console open the project that owns the key → Billing → confirm an active billing account is linked; re-read the terms;
 confirm your organisation allows sending these invoices to Google; copy RPM/TPM/RPD for the model from AI Studio.
+
+`invoice.gemini.require-paid-tier` can never be switched off on this profile: `SchemaSafetyGuard` refuses a start with
+`INVOICE_GEMINI_REQUIRE_PAID_TIER=false` (any spelling). `GET /api/admin/queue/status` shows the current
+`geminiMode`: `NOT_CONFIRMED`, `PAID`, `FREE_TIER_TEST` or `CONFLICT`.
+
+### 4.2 Free-tier test of ONE selected invoice (optional, owner-run)
+
+**What it is:** one deliberate extraction of **one explicitly selected invoice PDF** through a **free-tier** Gemini
+key, to see the pipeline `QUEUED → PROCESSING → NEEDS_REVIEW` work end to end. It is **not** paid mode and does not
+claim to be: `INVOICE_GEMINI_PAID_TIER_CONFIRMED` stays unset.
+
+**Which PDF:** a genuine invoice sample may be used, but only one that is **authorized for this test and
+non-confidential** - e.g. a sample you are permitted to share with a third party, or a synthetic one from
+`docs/react-handoff/sample-invoices/`. On the free tier Google may use the content to improve its products and human
+reviewers may read it, and the terms say not to submit sensitive, confidential or personal information (4.1).
+**Confidential customer or business invoices must not be sent to the free tier** unless that use has been approved
+under the data-handling requirements that apply to them (customer contract, company policy, privacy law). The same PDF
+is also stored in the private bucket and its extracted values in the database (section 6.3).
+
+**What the application can and cannot check:** it restricts processing **by invoice id** - exactly one id in
+`INVOICE_WORKER_ONLY_INVOICE_IDS`. It does **not** look at whether a PDF contains synthetic or real values, and it
+cannot tell whether a document is confidential. Choosing an appropriate PDF, and allowlisting only its id, is the
+operator's responsibility.
+
+**No charges, honestly stated:** the application cannot see billing. Charges are avoided only if the key's Google
+Cloud project has **no billing account linked**. If billing is ever linked, the project leaves the free tier and calls
+are billed - no application setting can prevent that.
+
+**What the code enforces** (refused at startup by `SchemaSafetyGuard` before any database connection; proven by
+`FreeTierStartupGuardTest`):
+
+| Rule | Refused when |
+|---|---|
+| Separate mode | `INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED` and `INVOICE_GEMINI_PAID_TIER_CONFIRMED` are both true |
+| One invoice | `INVOICE_WORKER_ONLY_INVOICE_IDS` is empty, a list, not a positive number - even with the worker off |
+| Key and endpoint | `GEMINI_API_KEY` missing, or any `GEMINI_BASE_URL` override (the key only goes to Google's official endpoint) |
+| Model | `GEMINI_MODEL` is not exactly `gemini-3.5-flash-lite` (the model whose limits were reported) |
+| Limits | not whole positive numbers, or above **15 RPM / 250,000 TPM / 500 RPD** - the owner-reported AI Studio values for this project on 2026-10-28, **not** a Google guarantee; lower is fine |
+| Pacing | `gemini.limits.safety-margin` above 0.8, or even pacing switched off |
+| Legacy endpoint | `INVOICE_LEGACY_EXTRACT_ENABLED` true (it would bypass the allowlist; the endpoint also answers 409 in this mode) |
+
+At run time (`FreeTierTestModeTest`, `FreeTierQueuePgIntegrationTest`): the worker claims only the allowlisted invoice;
+stale-claim and in-flight recovery touch only that invoice; it makes **at most one Gemini call per run** and then
+halts (`idleReason` says so); a failure of any kind (invalid key, 403, 429, daily quota, 5xx, network, bad answer) is
+**final** - `FAILED`, no back-off retry, no waiting for the daily reset; an invoice that already had a Gemini call is
+never sent again, also after a restart. Paid mode keeps its normal retries.
+
+**Before you start:**
+
+1. The deployed build contains this change: `GET /api/admin/queue/status` (as ADMIN) has a `geminiMode` field.
+2. Google Cloud Console → the project that owns the key → **Billing**: no billing account linked. Google AI Studio →
+   the key's project shows the **free** tier and its limits for `gemini-3.5-flash-lite` (re-read them; they can change).
+3. Nobody else uses this key's project during the test (AI Studio, Postman, other apps share its quota invisibly).
+4. One selected PDF: authorized for this test, non-confidential (see *Which PDF* above), a real PDF of at most 10 MB.
+   It is uploaded by a dedicated test vendor account. A file that vendor already uploaded is refused as a duplicate,
+   and an invoice that already had a Gemini call is never sent again - pick a fresh upload.
+
+**Variables** (Render → Environment; the key is entered in Render only, never in Git, chat or logs):
+
+| Name | Value |
+|---|---|
+| `GEMINI_API_KEY` | *(secret - your free-tier key)* |
+| `INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED` | `true` |
+| `INVOICE_WORKER_ENABLED` | `true` |
+| `INVOICE_WORKER_ONLY_INVOICE_IDS` | `<the ONE selected invoice id>` (from step 1 below) |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` |
+| `GEMINI_LIMIT_RPM` | `5` (× 0.8 → 4 per minute, one call every 15 s) |
+| `GEMINI_LIMIT_TPM` | `50000` |
+| `GEMINI_LIMIT_RPD` | `20` (× 0.8 → 16 per day) |
+| `GEMINI_INITIAL_TOKEN_ESTIMATE` | `5000` |
+| `INVOICE_GEMINI_PAID_TIER_CONFIRMED` | **leave unset** |
+| `INVOICE_LEGACY_EXTRACT_ENABLED` | **leave unset** (= false) |
+| `GEMINI_BASE_URL`, `INVOICE_GEMINI_REQUIRE_PAID_TIER` | **never set** |
+
+**Test (one invoice):**
+
+1. With the worker still **off** (no Gemini variables set): log in as the test vendor, `POST /api/batches`, upload the
+   selected PDF with `POST /api/batches/{id}/files` → `202`, note `invoiceId`; `GET /api/invoices/{invoiceId}` →
+   `QUEUED`. Nothing is sent anywhere yet.
+2. Set the variables above with that id → *Save, rebuild and deploy* (Render restarts the service). If the log shows
+   `SchemaSafetyGuard: REFUSING to start`, the old version keeps serving: read the message (it names the variable,
+   never its value), fix, save again.
+3. As ADMIN, `GET /api/admin/queue/status`: `geminiMode=FREE_TIER_TEST`, `onlyInvoiceIds=[<id>]`, `workerRunning=true`.
+4. The worker starts polling 10 s after startup (then every 2 s) and claims only that invoice:
+   `GET /api/invoices/{invoiceId}` → `PROCESSING` → `NEEDS_REVIEW` (or `FAILED` with a reason - a failure is final).
+   The log shows exactly one `Sending invoice PDF (... bytes) to Gemini model gemini-3.5-flash-lite` line and then
+   `Extraction worker halted: Free-tier test finished: one Gemini call was made in this run for invoice <id> (result:
+   ...)`. The key never appears in the log.
+5. Queue status now shows `workerRunning=false` and the same halt reason as `idleReason`; `quota.requestsSinceDailyReset`
+   went up by 1. Every other queued invoice is unchanged. Keep polling while you check: Render Free spins the service
+   down after 15 idle minutes.
+6. **Roll back right away** (below), whatever the result. A second test needs a **new** upload and its new invoice id
+   (the halt message says "another test needs a NEW upload with its own invoice id").
+
+**Rollback (free-tier test)** - stops all further Gemini calls; deletes no invoice, batch, event or PDF:
+
+1. Render → Environment: **remove** `INVOICE_WORKER_ENABLED`, `INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED` and
+   `INVOICE_WORKER_ONLY_INVOICE_IDS` (removing `GEMINI_API_KEY` too is safest) → *Save, rebuild and deploy*.
+   Leave `INVOICE_GEMINI_PAID_TIER_CONFIRMED` unset. Removing only `INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED` while
+   keeping a stray allowlist is harmless (nothing is confirmed, so nothing is sent), but remove all three.
+2. Queue status: `workerEnabled=false`, `geminiMode=NOT_CONFIRMED`, `onlyInvoiceIds=[]`. New uploads stay `QUEUED`
+   (gate G5).
+3. Emergency stop without a deploy: delete or rotate the key in Google AI Studio - any further call fails (401/403).
+   Within a run the worker has already halted after its one call, so the key is only needed for a later restart.
+4. Do **not** edit the database. The test invoice keeps its result (`NEEDS_REVIEW` or `FAILED`), its PDF and its
+   workflow events; a reviewer may handle or reject it normally. If a restart interrupted the one call, the invoice
+   stays `PROCESSING`: with the free-tier variables still set the worker would mark it `FAILED` 10 minutes after the
+   claim (never re-sent); after the rollback the worker does not run, so it simply stays `PROCESSING`. To remove the
+   uploaded sample from storage later, follow the retention decision (6.3) - not a manual delete.
+5. Do not use Render's image *Rollback* for this - it does not restore variables (section 12).
 
 ## 5. Neon setup (owner, in the Neon Console)
 
@@ -330,6 +440,9 @@ Render's Rollback restores an earlier **image** but not earlier **environment va
 cookie demo build: restore `SPRING_PROFILES_ACTIVE=render-free-demo` and the old `INVOICE_DB_*` values (from step 4),
 then Dashboard → Rollback to the previous deploy. Neon data is untouched by a rollback. Do not delete the old Render
 Postgres until the new release is verified and the owner has decided about its data (section 13).
+
+To stop Gemini extraction (e.g. after the free-tier test), change **variables**, not the image: section 4.2,
+*Rollback (free-tier test)*.
 
 If the new deploy fails its health check, nothing needs rolling back: the old version is still serving. Read the
 first `ERROR` / `Caused by` line in the deploy log (section 8), fix the variable, deploy again.

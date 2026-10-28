@@ -18,7 +18,9 @@ import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 
 /**
  * ONE shared pacer for every Gemini call of this application (the queue worker and the legacy /extract endpoint).
@@ -151,9 +153,20 @@ public class GeminiQuotaGuard {
     /** Calls that never reported back (process died) become UNKNOWN; they keep counting against the quota. */
     @Transactional
     public int recoverInFlight() {
+        return recoverInFlight(Collections.<Long>emptySet());
+    }
+
+    /**
+     * Same, but with a worker allowlist (invoice.worker.only-invoice-ids) only the attempts of those invoices are
+     * touched: a controlled test changes no row of any other invoice. Empty = all invoices (normal operation).
+     */
+    @Transactional
+    public int recoverInFlight(Set<Long> onlyInvoiceIds) {
         LocalDateTime now = LocalDateTime.now(clock);
-        List<GeminiCallAttempt> stale = attempts.findByOutcomeStartedBefore(
-                GeminiCallAttempt.Outcome.IN_FLIGHT, now.minusMinutes(IN_FLIGHT_STALE_MINUTES));
+        LocalDateTime cutoff = now.minusMinutes(IN_FLIGHT_STALE_MINUTES);
+        List<GeminiCallAttempt> stale = onlyInvoiceIds.isEmpty()
+                ? attempts.findByOutcomeStartedBefore(GeminiCallAttempt.Outcome.IN_FLIGHT, cutoff)
+                : attempts.findByOutcomeStartedBeforeAmong(GeminiCallAttempt.Outcome.IN_FLIGHT, cutoff, onlyInvoiceIds);
         for (GeminiCallAttempt attempt : stale) {
             attempt.markUnknown(now);
         }
@@ -161,6 +174,12 @@ public class GeminiQuotaGuard {
             log.warn("{} Gemini call(s) never reported back; marked UNKNOWN", stale.size());
         }
         return stale.size();
+    }
+
+    /** True when any Gemini call was ever recorded for this invoice (the free-tier test sends each invoice once). */
+    @Transactional(readOnly = true)
+    public boolean hasAnyAttempt(Long invoiceId) {
+        return attempts.maxAttemptNumber(invoiceId) > 0;
     }
 
     /** Next midnight Pacific time, as a local (server time zone) date-time - the format every column uses. */

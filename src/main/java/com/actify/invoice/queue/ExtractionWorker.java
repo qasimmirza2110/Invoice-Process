@@ -33,6 +33,10 @@ import java.util.concurrent.ThreadLocalRandom;
  *
  * OFF unless invoice.worker.enabled=true AND the Gemini limits are configured (QuotaSettings). Tests call
  * processNextJob() directly.
+ *
+ * FREE_TIER_TEST mode (GeminiConfig): exactly ONE Gemini call per run. After the first claimed job - success or any
+ * failure - the worker halts until the next restart and reports why (getHaltReason). A failure is final (FAILED): no
+ * back-off retry and no waiting for the daily reset, so the test invoice is never sent a second time automatically.
  */
 @Component
 public class ExtractionWorker {
@@ -53,6 +57,8 @@ public class ExtractionWorker {
     private final boolean enabled;
     private final String workerName = "worker-" + ManagementFactory.getRuntimeMXBean().getName();
     private boolean warnedNotConfigured;
+    /** Set once the free-tier test has made its one call: no further claim in this run. Never contains a secret. */
+    private volatile String haltReason;
 
     public ExtractionWorker(ExtractionJobService jobService, ExtractionOutcomeService outcomes,
                             InvoiceDocumentStorage documentStorage, LlmInvoiceExtractor extractor,
@@ -75,7 +81,7 @@ public class ExtractionWorker {
             return;
         }
         try {
-            quotaGuard.recoverInFlight();
+            quotaGuard.recoverInFlight(jobService.getOnlyInvoiceIds());
             jobService.recoverStaleClaims();
             processNextJob();
         } catch (RuntimeException e) {
@@ -89,7 +95,7 @@ public class ExtractionWorker {
      * policy allows sending documents - GeminiConfig).
      */
     public boolean isRunning() {
-        if (!enabled) {
+        if (!enabled || haltReason != null) {
             return false;
         }
         // Without a key every claimed job would fail as CONFIGURATION and end up FAILED: a setup problem must leave
@@ -111,7 +117,7 @@ public class ExtractionWorker {
         // Same idea: an unconfirmed data policy leaves the queue untouched instead of failing every invoice.
         if (!geminiConfig.isDocumentSendingAllowed()) {
             if (!warnedNotConfigured) {
-                log.warn("Extraction worker is enabled but stays idle: {}", GeminiConfig.PAID_TIER_BLOCKED_REASON);
+                log.warn("Extraction worker is enabled but stays idle: {}", geminiConfig.getBlockedReason());
                 warnedNotConfigured = true;
             }
             return false;
@@ -123,9 +129,23 @@ public class ExtractionWorker {
         return enabled;
     }
 
-    /** False while a paid Gemini project is required but not confirmed (GeminiConfig). */
+    /** False while a paid Gemini project is required but not confirmed, or on conflicting confirmations (GeminiConfig). */
     public boolean isDocumentSendingAllowed() {
         return geminiConfig.isDocumentSendingAllowed();
+    }
+
+    /** Why the data policy blocks sending, or null (GeminiConfig.getBlockedReason). */
+    public String getDocumentSendingBlockedReason() {
+        return geminiConfig.getBlockedReason();
+    }
+
+    public GeminiConfig.Mode getGeminiMode() {
+        return geminiConfig.getMode();
+    }
+
+    /** Non-null once the free-tier test has made its one Gemini call in this run. */
+    public String getHaltReason() {
+        return haltReason;
     }
 
     /** Presence only - the key itself is never returned or logged. */
@@ -135,17 +155,23 @@ public class ExtractionWorker {
 
     /** @return true when a job was processed (success or failure), false when quota or the queue said "not now" */
     public boolean processNextJob() {
+        if (haltReason != null) {
+            return false;
+        }
         ClaimedJob job = jobService.claimNext(workerName);
         if (job == null) {
             return false;
         }
         long start = System.nanoTime();
+        String result = "UNEXPECTED_ERROR";
         try {
             byte[] pdf = documentStorage.read(job.getDocumentId(), job.getSha256());
             LlmExtractionResponse response = extractor.extract(pdf);
             quotaGuard.complete(job.getGeminiAttemptId(), Outcome.SUCCESS, 200, null, response.getTokenUsage(), elapsedMillis(start));
             outcomes.storeForReview(job.getInvoiceId(), response, elapsedMillis(start));
+            result = "SUCCESS";
         } catch (InvoiceExtractionException e) {
+            result = FailureClassifier.errorCode(e);
             handleProviderFailure(job, e, elapsedMillis(start));
         } catch (RuntimeException e) {
             log.error("Unexpected error while extracting invoice {}", job.getInvoiceId(), e);
@@ -153,6 +179,15 @@ public class ExtractionWorker {
                     elapsedMillis(start));
             outcomes.markFailed(job.getInvoiceId(), "UNEXPECTED_ERROR", "Unexpected error during processing", null,
                     elapsedMillis(start));
+        } finally {
+            // In a finally block so that even a failure while recording the outcome cannot allow a second call.
+            if (geminiConfig.isFreeTierTest()) {
+                haltReason = "Free-tier test finished: one Gemini call was made in this run for invoice "
+                        + job.getInvoiceId() + " (result: " + result + "). The worker makes no further call until the "
+                        + "next restart. Roll back now (docs/RENDER_DEPLOYMENT.md); another test needs a NEW upload "
+                        + "with its own invoice id.";
+                log.warn("Extraction worker halted: {}", haltReason);
+            }
         }
         return true;
     }
@@ -160,6 +195,15 @@ public class ExtractionWorker {
     private void handleProviderFailure(ClaimedJob job, InvoiceExtractionException e, long durationMs) {
         String code = FailureClassifier.errorCode(e);
         FailureClassifier.Decision decision = FailureClassifier.classify(e);
+        if (geminiConfig.isFreeTierTest()) {
+            // One attempt only: whatever went wrong (key, quota, network, answer) is final - nothing is re-queued.
+            Outcome outcome = decision == FailureClassifier.Decision.WAIT_FOR_DAILY_RESET ? Outcome.DAILY_QUOTA
+                    : decision == FailureClassifier.Decision.RETRY ? Outcome.RETRYABLE_ERROR : Outcome.PERMANENT_ERROR;
+            quotaGuard.complete(job.getGeminiAttemptId(), outcome, e.getHttpStatus(), code, e.getTokenUsage(), durationMs);
+            outcomes.markFailed(job.getInvoiceId(), code, e.getMessage() + " (free-tier test: no automatic retry)",
+                    e.getTokenUsage(), durationMs);
+            return;
+        }
         if (decision == FailureClassifier.Decision.WAIT_FOR_DAILY_RESET) {
             quotaGuard.complete(job.getGeminiAttemptId(), Outcome.DAILY_QUOTA, e.getHttpStatus(), code, e.getTokenUsage(), durationMs);
             outcomes.waitForDailyReset(job.getInvoiceId(), code, quotaGuard.nextDailyReset().plusMinutes(1),

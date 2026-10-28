@@ -437,6 +437,62 @@ class SchemaSafetyGuardTest {
                 .run(context -> assertRefusedBeforeDataSource(context, "worker without opt-in", "INVOICE_WORKER_ENABLED"));
     }
 
+    // ---- INVOICE_WORKER_ENABLED in every spelling Spring's binding accepts ----
+
+    private static final String[] WORKER_ON = {"true", "TRUE", "True", " true ", "yes", "YES", "on", "On", "1"};
+    private static final String[] WORKER_OFF = {"false", "FALSE", "no", "off", "0"};
+
+    @Test
+    void theSpellingsUnderTestAreExactlyTheOnesSpringBindsToABoolean() {
+        // ApplicationConversionService is what Spring Boot uses for @Value("${invoice.worker.enabled:false}").
+        org.springframework.boot.convert.ApplicationConversionService conversion =
+                new org.springframework.boot.convert.ApplicationConversionService();
+        for (String on : WORKER_ON) {
+            assertThat(conversion.convert(on.trim(), Boolean.class)).as(on).isTrue();
+        }
+        for (String off : WORKER_OFF) {
+            assertThat(conversion.convert(off, Boolean.class)).as(off).isFalse();
+        }
+    }
+
+    @Test
+    void theLocalDemoRefusesTheWorkerInEverySpellingThatSwitchesItOn() throws Exception {
+        for (String on : WORKER_ON) {
+            DATA_SOURCE_CREATED.set(false);
+            localDemo().withInitializer(environmentVariables("INVOICE_WORKER_ENABLED", on))
+                    .run(context -> assertRefusedBeforeDataSource(context, "worker '" + on + "'", "INVOICE_WORKER_ENABLED"));
+        }
+    }
+
+    @Test
+    void theLocalDemoStillStartsWithTheWorkerOffInEverySpelling() throws Exception {
+        for (String off : WORKER_OFF) {
+            DATA_SOURCE_CREATED.set(false);
+            localDemo().withInitializer(environmentVariables("INVOICE_WORKER_ENABLED", off))
+                    .run(SchemaSafetyGuardTest::assertStarted);
+        }
+    }
+
+    @Test
+    void anUnreadableWorkerSwitchRefusesTheLocalDemo() throws Exception {
+        localDemo().withInitializer(environmentVariables("INVOICE_WORKER_ENABLED", "maybe"))
+                .run(context -> assertRefusedBeforeDataSource(context, "worker 'maybe'", "must be true or false"));
+    }
+
+    @Test
+    void withTheGeminiOptInAnyOnSpellingStillNeedsTheInvoiceAllowlist() throws Exception {
+        for (String on : new String[]{"yes", "on", "1"}) {
+            DATA_SOURCE_CREATED.set(false);
+            localDemo().withInitializer(environmentVariables(concat(OPT_IN, "INVOICE_WORKER_ENABLED", on)))
+                    .run(context -> assertRefusedBeforeDataSource(context, "opt-in, worker '" + on + "'",
+                            "INVOICE_WORKER_ONLY_INVOICE_IDS"));
+        }
+        DATA_SOURCE_CREATED.set(false);
+        localDemo().withInitializer(environmentVariables(concat(OPT_IN, "INVOICE_WORKER_ENABLED", "yes",
+                        "INVOICE_WORKER_ONLY_INVOICE_IDS", "17")))
+                .run(SchemaSafetyGuardTest::assertStarted);
+    }
+
     private static String[] concat(String[] a, String... b) {
         String[] all = Arrays.copyOf(a, a.length + b.length);
         System.arraycopy(b, 0, all, a.length, b.length);

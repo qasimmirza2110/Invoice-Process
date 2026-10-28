@@ -81,7 +81,7 @@ public class GeminiInvoiceExtractor implements LlmInvoiceExtractor {
         // Backstop for every caller (worker and legacy endpoint): nothing leaves this server before the data policy
         // allows it (GeminiConfig).
         if (!geminiConfig.isDocumentSendingAllowed()) {
-            throw new InvoiceExtractionException(GeminiConfig.PAID_TIER_BLOCKED_REASON,
+            throw new InvoiceExtractionException(geminiConfig.getBlockedReason(),
                     InvoiceExtractionException.Kind.CONFIGURATION, null, null, null, null);
         }
 

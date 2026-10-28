@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -50,6 +51,13 @@ public interface GeminiCallAttemptRepository extends JpaRepository<GeminiCallAtt
     @Query("select a from GeminiCallAttempt a where a.outcome = :outcome and a.startedAt < :cutoff")
     List<GeminiCallAttempt> findByOutcomeStartedBefore(@Param("outcome") GeminiCallAttempt.Outcome outcome,
                                                        @Param("cutoff") LocalDateTime cutoff);
+
+    /** Same as findByOutcomeStartedBefore, but only for the named invoices (invoice.worker.only-invoice-ids). */
+    @Query("select a from GeminiCallAttempt a where a.outcome = :outcome and a.startedAt < :cutoff "
+            + "and a.invoice.id in :ids")
+    List<GeminiCallAttempt> findByOutcomeStartedBeforeAmong(@Param("outcome") GeminiCallAttempt.Outcome outcome,
+                                                            @Param("cutoff") LocalDateTime cutoff,
+                                                            @Param("ids") Collection<Long> ids);
 
     @Query("select a from GeminiCallAttempt a where a.invoice.id = :invoiceId order by a.attemptNumber asc")
     List<GeminiCallAttempt> findByInvoiceId(@Param("invoiceId") Long invoiceId);
