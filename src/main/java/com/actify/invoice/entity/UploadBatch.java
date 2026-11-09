@@ -73,6 +73,16 @@ public class UploadBatch {
     @Column(name = "closed_at")
     private LocalDateTime closedAt;
 
+    // The uploader's explicit statement, given when the batch is created and never changed afterwards, that every file
+    // of this batch is authorized for the Gemini FREE tier (contains no personal, sensitive or confidential
+    // information; Google may use it). Only such invoices are sent in FREE_TIER_AUTO_QUEUE mode.
+    // Added by docs/sql/free-tier-consent-migration.sql (default false: every older batch is NOT eligible).
+    @Column(name = "free_tier_consent", nullable = false, updatable = false)
+    private boolean freeTierConsent;
+
+    @Column(name = "free_tier_consent_at", updatable = false)
+    private LocalDateTime freeTierConsentAt;
+
     protected UploadBatch() {
     }
 
@@ -84,9 +94,18 @@ public class UploadBatch {
         this.defaultCategoryCode = defaultCategoryCode;
     }
 
+    public UploadBatch(AppUser owner, BatchSource source, String label, String defaultCategoryCode,
+                       boolean freeTierConsent) {
+        this(owner, source, label, defaultCategoryCode);
+        this.freeTierConsent = freeTierConsent;
+    }
+
     @PrePersist
     void onCreate() {
         createdAt = LocalDateTime.now();
+        if (freeTierConsent) {
+            freeTierConsentAt = createdAt;
+        }
     }
 
     public void close() {
@@ -113,4 +132,6 @@ public class UploadBatch {
     public String getRejections() { return rejections; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public LocalDateTime getClosedAt() { return closedAt; }
+    public boolean isFreeTierConsent() { return freeTierConsent; }
+    public LocalDateTime getFreeTierConsentAt() { return freeTierConsentAt; }
 }

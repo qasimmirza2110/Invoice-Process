@@ -103,12 +103,6 @@ public class GlobalExceptionHandler {
                 "Unsupported Content-Type for this endpoint.", request);
     }
 
-    // More specific than InvoiceExtractionException, so Spring picks this one: the call was never made.
-    @ExceptionHandler(QuotaUnavailableException.class)
-    public ResponseEntity<ErrorResponse> handleQuota(QuotaUnavailableException ex, HttpServletRequest request) {
-        return build(HttpStatus.TOO_MANY_REQUESTS, "Too many requests", ex.getMessage(), request);
-    }
-
     @ExceptionHandler(InvoiceExtractionException.class)
     public ResponseEntity<ErrorResponse> handleExtraction(InvoiceExtractionException ex, HttpServletRequest request) {
         return build(HttpStatus.BAD_GATEWAY, "Invoice extraction failed", ex.getMessage(), request);

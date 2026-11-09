@@ -49,40 +49,41 @@ class IntakeBoardServiceTest {
         assertThat(why).isEqualTo("Next extraction attempt at " + NOW.plusMinutes(5) + " (last attempt: HTTP_503).");
     }
 
-    @Test
-    void allowlistedIdsThatCanNeverBeExtractedAreNamedWithTheReason() {
-        Invoice queued = invoice(InvoiceStatus.QUEUED, null);
-        ReflectionTestUtils.setField(queued, "id", 20L);
-        ReflectionTestUtils.setField(queued, "ownerUserId", 3L);
-        Invoice done = invoice(InvoiceStatus.NEEDS_REVIEW, null);
-        ReflectionTestUtils.setField(done, "id", 21L);
-        ReflectionTestUtils.setField(done, "ownerUserId", 3L);
-        Invoice legacy = invoice(InvoiceStatus.EXTRACTED, null);
-        ReflectionTestUtils.setField(legacy, "id", 22L);
-        java.util.Set<Long> only = new java.util.TreeSet<>(java.util.Arrays.asList(20L, 21L, 22L, 99L));
-
-        java.util.List<String> problems = IntakeBoardService.allowlistProblems(only, java.util.Arrays.asList(queued, done, legacy));
-
-        assertThat(problems).containsExactly(
-                "Invoice 21 is NEEDS_REVIEW, not QUEUED; it will not be extracted again.",
-                "Invoice 22 is a legacy invoice without an extraction job; it is never extracted by the worker.",
-                "Invoice 99 does not exist, so the worker has nothing to extract for it.");
-        assertThat(IntakeBoardService.allowlistProblems(java.util.Collections.<Long>emptySet(), java.util.Collections.<Invoice>emptyList())).isEmpty();
+    private static Invoice withConsent(Invoice invoice, boolean consent) {
+        invoice.setBatch(new com.actify.invoice.entity.UploadBatch(mock(com.actify.invoice.user.AppUser.class), com.actify.invoice.entity.BatchSource.LOCAL,
+                "b", null, consent));
+        return invoice;
     }
 
     @Test
-    void aWorkerLimitedToNamedInvoicesSaysWhyEveryOtherInvoiceStaysQueued() {
-        Invoice other = invoice(InvoiceStatus.QUEUED, null);
-        ReflectionTestUtils.setField(other, "id", 5L);
-        Invoice chosen = invoice(InvoiceStatus.QUEUED, null);
-        ReflectionTestUtils.setField(chosen, "id", 17L);
-        java.util.Set<Long> only = java.util.Collections.singleton(17L);
+    void extractionStatesSeparateConsentQuotaProgressAndReadiness() {
+        Invoice noConsent = withConsent(invoice(InvoiceStatus.QUEUED, null), false);
+        Invoice legacy = invoice(InvoiceStatus.QUEUED, null); // no batch at all (pre-migration / legacy)
+        Invoice queued = withConsent(invoice(InvoiceStatus.QUEUED, null), true);
 
-        assertThat(IntakeBoardService.blockedReason(other, null, true, null, only, NOW))
-                .contains("limited to invoice(s) [17]").contains("stays queued");
-        assertThat(IntakeBoardService.blockedReason(chosen, null, true, null, only, NOW)).isEqualTo("Waiting in the extraction queue.");
-        // A worker that is off still says so first.
-        assertThat(IntakeBoardService.blockedReason(other, null, false, "off", only, NOW)).isEqualTo("Waiting for extraction: off");
+        assertThat(IntakeBoardService.extractionState(noConsent, null, true, false, NOW)).isEqualTo("MISSING_FREE_TIER_CONSENT");
+        assertThat(IntakeBoardService.extractionState(legacy, null, true, false, NOW)).isEqualTo("MISSING_FREE_TIER_CONSENT");
+        assertThat(IntakeBoardService.extractionState(queued, null, true, false, NOW)).isEqualTo("WAITING_FOR_EXTRACTION");
+        assertThat(IntakeBoardService.extractionState(queued, null, true, true, NOW)).isEqualTo("WAITING_FOR_QUOTA");
+        assertThat(IntakeBoardService.extractionState(queued, null, false, true, NOW)).isEqualTo("WAITING_FOR_EXTRACTION");
+
+        ExtractionJob deferred = mock(ExtractionJob.class);
+        when(deferred.getNextAttemptAt()).thenReturn(NOW.plusMinutes(1));
+        when(deferred.getLastErrorCode()).thenReturn("HTTP_429");
+        assertThat(IntakeBoardService.extractionState(queued, deferred, true, false, NOW)).isEqualTo("WAITING_FOR_QUOTA");
+
+        assertThat(IntakeBoardService.extractionState(invoice(InvoiceStatus.PROCESSING, null), null, true, false, NOW))
+                .isEqualTo("EXTRACTING");
+        assertThat(IntakeBoardService.extractionState(invoice(InvoiceStatus.NEEDS_REVIEW, null), null, true, false, NOW))
+                .isEqualTo("READY_FOR_REVIEWER_ASSIGNMENT");
+        assertThat(IntakeBoardService.extractionState(invoice(InvoiceStatus.NEEDS_REVIEW, 7L), null, true, false, NOW))
+                .isEqualTo("READY_FOR_REVIEW");
+    }
+
+    @Test
+    void theMissingConsentReasonIsUnderstandableAndNeverPromisesSafety() {
+        assertThat(IntakeBoardService.NO_FREE_TIER_CONSENT).contains("without free-tier").contains("never sent")
+                .doesNotContainIgnoringCase("safe");
     }
 
     @Test

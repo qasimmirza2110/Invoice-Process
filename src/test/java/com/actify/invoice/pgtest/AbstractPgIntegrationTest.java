@@ -120,6 +120,71 @@ public abstract class AbstractPgIntegrationTest {
         authInterceptor().token = null;
     }
 
+    @Autowired
+    private com.actify.invoice.storage.InvoiceDocumentStorage seedDocumentStorage;
+
+    @Autowired
+    private com.actify.invoice.repository.InvoiceDocumentRepository seedDocumentRepository;
+
+    @Autowired
+    private com.actify.invoice.repository.InvoiceRepository seedInvoiceRepository;
+
+    @Autowired
+    private org.springframework.transaction.PlatformTransactionManager seedTransactionManager;
+
+    /**
+     * TEST-ONLY seed of a LEGACY invoice (no owner, no batch, status EXTRACTED, V1, stored PDF) - the rows the removed
+     * direct-extraction endpoint used to write. Historical rows like these still exist in real databases, so the
+     * read/edit/version/document routes keep being tested against them. Nothing is sent to Gemini.
+     */
+    protected long seedLegacyInvoice(com.actify.invoice.dto.InvoiceExtractionResult result, byte[] pdf, String fileName) {
+        com.actify.invoice.storage.StoredDocument stored = seedDocumentStorage.store(pdf);
+        return new org.springframework.transaction.support.TransactionTemplate(seedTransactionManager).execute(s -> {
+            com.actify.invoice.entity.InvoiceDocument document = seedDocumentRepository.save(
+                    new com.actify.invoice.entity.InvoiceDocument(stored.getId(), stored.getSha256(), stored.getSizeBytes(),
+                            "application/pdf", fileName));
+            com.actify.invoice.entity.Invoice invoice = new com.actify.invoice.entity.Invoice();
+            invoice.setSourceFileName(fileName);
+            invoice.setSourceFileSize((long) pdf.length);
+            invoice.setSourceDocument(document);
+            invoice.setStatus(com.actify.invoice.entity.InvoiceStatus.EXTRACTED);
+            invoice.setRawLlmResponse(result.getRawResponse());
+            invoice.setInvoiceNumber(result.getInvoiceNumber());
+            invoice.setInvoiceDate(result.getInvoiceDate() == null ? null : java.time.LocalDate.parse(result.getInvoiceDate()));
+            invoice.setSellerName(result.getSellerName());
+            invoice.setSellerTaxId(result.getSellerTaxId());
+            invoice.setBuyerName(result.getBuyerName());
+            invoice.setBuyerTaxId(result.getBuyerTaxId());
+            invoice.setCurrency(result.getCurrency());
+            invoice.setSubtotal(result.getSubtotal());
+            invoice.setDiscountAmount(result.getDiscountAmount());
+            invoice.setShippingAmount(result.getShippingAmount());
+            invoice.setTaxAmount(result.getTaxAmount());
+            invoice.setTotalAmount(result.getTotalAmount());
+            for (com.actify.invoice.dto.InvoiceItemDto dto : result.getItems()) {
+                com.actify.invoice.entity.InvoiceItem item = new com.actify.invoice.entity.InvoiceItem();
+                item.setDescription(dto.getDescription());
+                item.setQuantity(dto.getQuantity());
+                item.setUnitPrice(dto.getUnitPrice());
+                item.setTaxRate(dto.getTaxRate());
+                item.setLineTotal(dto.getLineTotal());
+                invoice.addItem(item);
+            }
+            com.actify.invoice.entity.Invoice saved = seedInvoiceRepository.save(invoice);
+            versionWriter.recordExtraction(saved);
+            return saved.getId();
+        });
+    }
+
+    /** TEST-ONLY seed of a legacy upload whose extraction FAILED (no document, no version). */
+    protected long seedFailedLegacyInvoice(String fileName, String reason) {
+        com.actify.invoice.entity.Invoice invoice = new com.actify.invoice.entity.Invoice();
+        invoice.setSourceFileName(fileName);
+        invoice.setStatus(com.actify.invoice.entity.InvoiceStatus.FAILED);
+        invoice.setFailureReason(reason);
+        return seedInvoiceRepository.save(invoice).getId();
+    }
+
     private AuthInterceptor authInterceptor() {
         List<ClientHttpRequestInterceptor> interceptors = restTemplate.getRestTemplate().getInterceptors();
         for (ClientHttpRequestInterceptor interceptor : interceptors) {

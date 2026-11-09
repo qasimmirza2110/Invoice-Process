@@ -168,7 +168,11 @@ class BatchQueuePgIntegrationTest extends AbstractQueuePgTest {
         }
         List<String> seen = Collections.synchronizedList(new ArrayList<>());
         doAnswer(inv -> {
-            String text = new String((byte[]) inv.getArgument(0), StandardCharsets.US_ASCII);
+            // PDFBox writes compressed content streams (TestPdfs), so the marker is read as page text, not raw bytes.
+            String text;
+            try (org.apache.pdfbox.pdmodel.PDDocument pdf = org.apache.pdfbox.Loader.loadPDF((byte[]) inv.getArgument(0))) {
+                text = new org.apache.pdfbox.text.PDFTextStripper().getText(pdf);
+            }
             seen.add(text.substring(text.indexOf("fifo-"), text.indexOf("fifo-") + 10).trim());
             return new LlmExtractionResponse(validResult(UUID.randomUUID().toString().substring(0, 8)), null);
         }).when(llmInvoiceExtractor).extract(any(byte[].class));
@@ -245,13 +249,13 @@ class BatchQueuePgIntegrationTest extends AbstractQueuePgTest {
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             Future<List<Long>> first = pool.submit(() -> transactionTemplate.execute(s -> {
-                List<Long> ids = jobRepository.lockNextEligible(LocalDateTime.now());
+                List<Long> ids = jobRepository.lockNextFreeTierEligible(LocalDateTime.now());
                 firstHoldsLock.countDown();
                 await(secondDone);          // keep the row lock until the second claim has run
                 return ids;
             }));
             assertThat(firstHoldsLock.await(20, TimeUnit.SECONDS)).isTrue();
-            Future<List<Long>> second = pool.submit(() -> transactionTemplate.execute(s -> jobRepository.lockNextEligible(LocalDateTime.now())));
+            Future<List<Long>> second = pool.submit(() -> transactionTemplate.execute(s -> jobRepository.lockNextFreeTierEligible(LocalDateTime.now())));
             List<Long> secondIds = second.get(20, TimeUnit.SECONDS); // must NOT wait for the first lock
             secondDone.countDown();
             List<Long> firstIds = first.get(20, TimeUnit.SECONDS);

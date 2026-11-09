@@ -103,24 +103,11 @@ class InvoiceVersioningPgIntegrationTest extends AbstractPgIntegrationTest {
         return com.actify.invoice.service.TestPdfs.onePage("integration-test document " + marker);
     }
 
-    private ResponseEntity<String> upload(byte[] bytes, String fileName) {
-        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
-        body.add("file", new ByteArrayResource(bytes) {
-            @Override
-            public String getFilename() {
-                return fileName;
-            }
-        });
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
-        return http.postForEntity("/api/invoices/extract", new HttpEntity<>(body, headers), String.class);
-    }
-
-    /** Extracts a synthetic invoice through the real endpoint and returns the response JSON. */
+    /** Seeds a synthetic LEGACY invoice (V1, stored PDF) and returns its JSON as GET /api/invoices/{id} serves it. */
     private JsonNode extract(InvoiceExtractionResult result, byte[] pdf) throws Exception {
-        when(llmInvoiceExtractor.extract(any(byte[].class))).thenReturn(new LlmExtractionResponse(result, null));
-        ResponseEntity<String> response = upload(pdf, unique("synthetic") + ".pdf");
-        assertThat(response.getStatusCodeValue()).as(response.getBody()).isEqualTo(201);
+        long id = seedLegacyInvoice(result, pdf, unique("synthetic") + ".pdf");
+        ResponseEntity<String> response = http.getForEntity("/api/invoices/" + id, String.class);
+        assertThat(response.getStatusCodeValue()).as(response.getBody()).isEqualTo(200);
         return json(response.getBody());
     }
 
@@ -253,8 +240,8 @@ class InvoiceVersioningPgIntegrationTest extends AbstractPgIntegrationTest {
         assertThat(v1.get("total")).isEqualTo("11990.00");
         assertThat(v1.get("no_changes")).isEqualTo(true);
         assertThat(v1.get("source_document_id")).isEqualTo(docId);
-        // Phase 1: the version records who caused it (the logged-in test admin who uploaded).
-        assertThat(v1.get("changed_by")).isEqualTo("user:" + testAdmin().getId());
+        // An extraction is background work (no logged-in request), so V1 has no user.
+        assertThat(v1.get("changed_by")).isNull();
 
         // GET returns the same current data and version.
         JsonNode got = json(http.getForObject("/api/invoices/" + id, String.class));
@@ -291,50 +278,6 @@ class InvoiceVersioningPgIntegrationTest extends AbstractPgIntegrationTest {
         ResponseEntity<String> r = http.getForEntity("/api/documents/" + docId, String.class);
         assertThat(r.getStatusCodeValue()).isEqualTo(500);
         assertThat(r.getBody()).contains("integrity").doesNotContain(STORAGE_DIR.toString());
-    }
-
-    @Test
-    void failedVersionWriteDuringExtractionRollsBackEverythingAndDeletesTheFile() throws Exception {
-        doThrow(new IllegalStateException("simulated version insert failure"))
-                .when(versionWriter).append(any(), eq(1), eq(VersionChangeSource.LLM_EXTRACTION), any(), any(), any());
-        when(llmInvoiceExtractor.extract(any(byte[].class)))
-                .thenReturn(new LlmExtractionResponse(synthetic(unique("INV")), null));
-        String fileName = unique("rollback") + ".pdf";
-        long filesBefore = storedFileCount();
-        long documentsBefore = jdbc.queryForObject("select count(*) from invoice_documents", Long.class);
-
-        ResponseEntity<String> r = upload(syntheticPdf(fileName), fileName);
-
-        assertThat(r.getStatusCodeValue()).isEqualTo(500);
-        Map<String, Object> row = jdbc.queryForMap("select id, status, failure_reason, source_document_id from invoices "
-                + "where source_file_name = ?", fileName);
-        long id = ((Number) row.get("id")).longValue();
-        // The rolled-back transaction committed nothing. Afterwards the pre-existing markFailed() records the
-        // traceable FAILED row (it keeps the header values that were already on the in-memory object, as it
-        // always has for a failed save - status FAILED is what marks them as unusable).
-        assertThat(row.get("status")).isEqualTo("FAILED");
-        assertThat(row.get("failure_reason")).isEqualTo("Unexpected error during processing");
-        assertThat(row.get("source_document_id")).isNull();
-        assertThat(itemRows(id)).isEmpty();
-        assertThat(versionCount(id)).isZero();
-        assertThat(jdbc.queryForObject("select count(*) from invoice_documents", Long.class)).isEqualTo(documentsBefore);
-        assertThat(storedFileCount()).isEqualTo(filesBefore);          // the stored PDF was deleted again
-    }
-
-    @Test
-    void existingExtractionValidationFailureStillReturnsTheOld422Shape() throws Exception {
-        InvoiceExtractionResult wrong = synthetic(unique("INV"));
-        wrong.setTotalAmount(new BigDecimal("99999.00"));
-        when(llmInvoiceExtractor.extract(any(byte[].class))).thenReturn(new LlmExtractionResponse(wrong, null));
-        long filesBefore = storedFileCount();
-
-        ResponseEntity<String> r = upload(syntheticPdf(unique("bad")), unique("bad") + ".pdf");
-
-        assertThat(r.getStatusCodeValue()).isEqualTo(422);
-        JsonNode body = json(r.getBody());
-        assertThat(body.has("fieldErrors")).isFalse();
-        assertThat(body.get("error").asText()).isEqualTo("Invoice validation failed");
-        assertThat(storedFileCount()).isEqualTo(filesBefore);          // nothing is stored for a rejected extraction
     }
 
     // ------------------------------------------------------------------ corrections
@@ -663,10 +606,7 @@ class InvoiceVersioningPgIntegrationTest extends AbstractPgIntegrationTest {
 
     @Test
     void failedUploadsCannotBeEdited() throws Exception {
-        when(llmInvoiceExtractor.extract(any(byte[].class))).thenThrow(new InvoiceExtractionException("simulated provider failure"));
-        String fileName = unique("failed") + ".pdf";
-        assertThat(upload(syntheticPdf(fileName), fileName).getStatusCodeValue()).isEqualTo(502);
-        long id = jdbc.queryForObject("select id from invoices where source_file_name = ?", Long.class, fileName);
+        long id = seedFailedLegacyInvoice(unique("failed") + ".pdf", "simulated provider failure");
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("baseVersion", 0);

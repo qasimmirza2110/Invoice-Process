@@ -50,7 +50,7 @@ Someone else's object answers **404** (same as "does not exist"); a wrong role o
 | `INVOICE_DB_URL`, `INVOICE_DB_USERNAME`, `INVOICE_DB_PASSWORD` | per database | Connection settings (the password may come from pgpass instead). |
 | `INVOICE_WORKER_ENABLED` | to process queues | `true` starts the background worker… |
 | `GEMINI_LIMIT_RPM`, `GEMINI_LIMIT_TPM`, `GEMINI_LIMIT_RPD`, `GEMINI_INITIAL_TOKEN_ESTIMATE` | for the worker | …but only when these real limits (from AI Studio, for the configured model) are set. No defaults on purpose. |
-| `INVOICE_GEMINI_PAID_TIER_CONFIRMED` | extraction outside the local demo | `true` only after checking that the Gemini key's Google Cloud project has active billing; until then the worker sends nothing. |
+| `INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED` | for extraction | `true` only after checking that the Gemini key's Google Cloud project has no active billing account; until then the worker sends nothing, and even then only batches created with `freeTierProcessingConsent=true` are sent (free tier only, no paid mode). |
 | `INVOICE_CORS_ALLOWED_ORIGINS` | separately hosted frontend only | exact origins; empty = no CORS. |
 | `INVOICE_GOOGLE_CLIENT_ID`, `INVOICE_GOOGLE_API_KEY`, `INVOICE_GOOGLE_APP_ID` | Google Drive picker | public browser values; setup in the runbook section 12. Empty = "Not configured". |
 | `INVOICE_ONEDRIVE_ACCOUNT_TYPE`, `INVOICE_ONEDRIVE_CLIENT_ID` (+ `INVOICE_ONEDRIVE_TENANT_ID`, `INVOICE_ONEDRIVE_SHAREPOINT_BASE_URL` for work/school) | OneDrive picker | account type is the owner's decision (PERSONAL or WORK_OR_SCHOOL). |
@@ -176,12 +176,14 @@ Then log in through the API (Postman "00 - Login" or the React frontend). Remove
 
 ### 9.1 Optional: ONE controlled Gemini extraction in the local demo
 
-Default = no Gemini. To prove extraction end-to-end on **one synthetic PDF**, without touching the live/test databases
-and without processing the queued backlog. Each numbered step that calls Google or restarts the app needs its own
-approval ("APPROVE LOCALDEMO START", "APPROVE GEMINI SYNTHETIC SMOKE TEST").
+Default = no Gemini. To prove extraction end-to-end on **synthetic PDFs**, without touching the live/test databases.
+Only batches created with free-tier consent are ever sent, so the existing (unconsented) backlog is never processed.
+Each numbered step that calls Google or restarts the app needs its own approval ("APPROVE LOCALDEMO START",
+"APPROVE GEMINI SYNTHETIC SMOKE TEST").
 
-1. With the app running normally (no Gemini), log in as a vendor and upload one **synthetic** PDF (for example a file
-   from `samples/` whose footer says it is synthetic). Note its invoice id **N** in "My batches".
+1. With the app running normally (no Gemini), log in as a vendor, create a batch **with** free-tier consent
+   (`freeTierProcessingConsent: true`) and upload one **synthetic** PDF (for example a file from `samples/` whose footer
+   says it is synthetic). Note its invoice id **N** in "My batches" (for watching it - it is not configured anywhere).
 2. Stop the app (red square in Eclipse). Never start a second instance while port 8088 is bound.
 3. In a **copy** of the localdemo run configuration (Run Configurations → right-click "Invoice Process - localdemo" →
    Duplicate → name it e.g. "Invoice Process - localdemo + Gemini test"), Environment tab, add the values below.
@@ -189,32 +191,30 @@ approval ("APPROVE LOCALDEMO START", "APPROVE GEMINI SYNTHETIC SMOKE TEST").
 
    | Variable | Value |
    |---|---|
-   | `INVOICE_LOCALDEMO_GEMINI_ENABLED` | `true` (the explicit opt-in) |
+   | `INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED` | `true` (the explicit opt-in; free-tier key only) |
    | `GEMINI_API_KEY` | your key from Google AI Studio (never in a file, chat or screenshot) |
-   | `GEMINI_MODEL` | **required**, e.g. `gemini-3.5-flash-lite` – the model whose limits you copy below |
+   | `GEMINI_MODEL` | **required**: `gemini-3.5-flash-lite` (the only model) |
    | `GEMINI_LIMIT_RPM`, `GEMINI_LIMIT_TPM`, `GEMINI_LIMIT_RPD` | that model's limits from AI Studio, **whole numbers** (`250000`, not `250k`) |
    | `GEMINI_INITIAL_TOKEN_ESTIMATE` | `3000` (input tokens to assume before real usage exists) |
    | `INVOICE_WORKER_ENABLED` | `true` |
-   | `INVOICE_WORKER_ONLY_INVOICE_IDS` | **N** (only this invoice is ever claimed) |
 
 4. Start it. `SchemaSafetyGuard` refuses the start – naming the missing setting, never a value – unless: profile is
    exactly `localdemo`, the database is exactly `localhost:5432/invoice_process_local_demo_db`, `ddl-auto=validate`, the
    key is set, the endpoint is Google's official `https://generativelanguage.googleapis.com/v1beta` (no override),
-   `GEMINI_MODEL` is set explicitly, all limits are valid whole numbers, the legacy single-file extraction stays off, and
-   – with the worker on – `INVOICE_WORKER_ONLY_INVOICE_IDS` is a list of ids. If a listed id does not exist or is not
-   QUEUED, the admin "Intake & assignment" panel says so in red.
+   `GEMINI_MODEL=gemini-3.5-flash-lite`, all limits are valid whole numbers, the safety margin is at most 0.8 and even
+   pacing is on.
 5. Watch the admin page: invoice N goes `QUEUED` → `PROCESSING` → `NEEDS_REVIEW` (or `FAILED` with a safe reason). Every
-   other queued invoice stays `QUEUED` and says "this run's worker is limited to invoice(s) [N]". Gemini usage shows
+   unconsented queued invoice stays `QUEUED` with "uploaded without free-tier processing consent". Gemini usage shows
    the tokens **Gemini reported** (never estimated values as usage).
 6. Stop the app and go back to the normal configuration (no key, worker off).
 
-Cost/quota: one request per attempt. A transient error (network/timeout/5xx/per-minute 429) is retried at most
+Cost/quota: one request per attempt. A transient error (network/timeout/5xx) is retried at most
 `invoice.worker.max-attempts` (3) times with back-off (30 s, 2 min, 8 min); when Google sends a wait hint
 (`Retry-After` header or `RetryInfo.retryDelay`), the next try waits at least that long (capped at 1 hour). A timeout
-may still have used quota. A daily-quota 429 pauses until the Pacific-time reset instead of failing.
+may still have used quota. A per-minute 429 puts the invoice back in the queue without using an attempt and holds the
+whole queue for at least 60 s; a daily-quota 429 pauses until the Pacific-time reset instead of failing.
 Malformed/blocked/empty answers and HTTP 400/401/403/404 (bad request, wrong key, no access, unknown model) fail at once
-(no retry). In the local demo the legacy single-file extraction (`POST /api/invoices/extract`) is switched off (HTTP 409), so the
-worker's allowlist is the only way an invoice reaches Gemini.
+(no retry). There is no direct extraction endpoint: the queue worker is the only way an invoice reaches Gemini.
 
 **Pacing (since 2026-10-23):** the effective requests-per-minute limit is the **lower** of `GEMINI_LIMIT_RPM` and the
 project ceiling `gemini.limits.business-max-rpm` (default **15**). The safety margin (0.8) leaves 12 calls a minute, and
@@ -239,12 +239,16 @@ reads when it starts (restart Eclipse after creating or changing one):
 | `INVOICE_JWT_SECRET` | `${env_var:INVOICE_DEV_JWT_SECRET}` |
 | `GEMINI_API_KEY` | `${env_var:INVOICE_GEMINI_API_KEY}` |
 | `GEMINI_MODEL` | `gemini-3.5-flash-lite` (the model whose limits were copied from AI Studio) |
-| `GEMINI_LIMIT_RPM` / `_TPM` / `_RPD` | `15` / `250000` / `500`; `GEMINI_INITIAL_TOKEN_ESTIMATE=3000` |
+| `GEMINI_LIMIT_RPM` / `_TPM` / `_RPD` | the values AI Studio shows for the key's project (owner target 15 / 250000; RPD as shown); `GEMINI_INITIAL_TOKEN_ESTIMATE=3000` |
 | `INVOICE_WORKER_ENABLED` | `true` – extracts every **new** queued upload, paced (one call start per 5 s at most), max 3 attempts, pauses when the daily budget is used up |
-| `INVOICE_LEGACY_EXTRACT_ENABLED` | `false` – Gemini is only called through the queue |
+| `INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED` | `true` – only with a free-tier key whose project has no billing; only consented batches are sent |
 
-The 50 legacy invoices (owner empty) have no extraction job, so the worker never touches them; it does not need
-`INVOICE_WORKER_ONLY_INVOICE_IDS` (that allowlist is only for controlled test runs). Users are created on the admin page.
+Remove from the launch file (no longer read): `INVOICE_LEGACY_EXTRACT_ENABLED`, `INVOICE_WORKER_ONLY_INVOICE_IDS`,
+`INVOICE_GEMINI_PAID_TIER_CONFIRMED`, `INVOICE_LOCALDEMO_GEMINI_ENABLED`. Limits: use the values AI Studio shows for the
+project (RPD must be read there, not assumed).
+
+The 50 legacy invoices (owner empty) have no batch and no extraction job, so the worker never touches them. Users are
+created on the admin page.
 Only one instance may use port 8088 – stop any other first. `pgtest` stays for Maven tests only; the local demo stays
 available as "Invoice Process - localdemo" (its login key: `${env_var:INVOICE_LOCALDEMO_JWT_SECRET}`).
 

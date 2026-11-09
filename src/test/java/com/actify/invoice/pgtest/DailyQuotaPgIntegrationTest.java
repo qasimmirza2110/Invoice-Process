@@ -22,8 +22,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Daily quota (TEST database, own fake model id): a 429 "per day" from Gemini pauses the whole queue until the
- * next midnight Pacific time WITHOUT using up the invoice's attempts; the admin status shows the pause, and the
- * legacy /extract endpoint answers 429 without calling Gemini. Everything happens in one test because the pause
+ * next midnight Pacific time WITHOUT using up the invoice's attempts, and the admin status shows the pause and which
+ * budget is exhausted. Everything happens in one test because the pause
  * then lasts for the rest of the (fake) model's day.
  */
 class DailyQuotaPgIntegrationTest extends AbstractQueuePgTest {
@@ -36,7 +36,7 @@ class DailyQuotaPgIntegrationTest extends AbstractQueuePgTest {
     }
 
     @Test
-    void dailyQuotaPausesTheQueueAndTheLegacyEndpointUntilTheReset() throws Exception {
+    void dailyQuotaPausesTheQueueUntilTheReset() throws Exception {
         drainQueue();
         actAs(createUser(Role.VENDOR));
         long first = queueOneInvoice("daily-1");
@@ -62,22 +62,13 @@ class DailyQuotaPgIntegrationTest extends AbstractQueuePgTest {
         assertThat(status.at("/quota/pausedUntil").isNull()).isFalse();
         assertThat(status.at("/quota/requestsSinceDailyReset").asInt()).isEqualTo(1);
 
-        // The legacy endpoint shares the same guard: no call, 429, upload marked FAILED.
-        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
-        body.add("file", new ByteArrayResource(syntheticPdf("legacy-daily")) {
-            @Override
-            public String getFilename() {
-                return "legacy.pdf";
-            }
-        });
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
-        int before = jdbc.queryForObject("select count(*) from gemini_call_attempts where model_id = ?", Integer.class, MODEL);
-        ResponseEntity<String> legacy = restTemplate.postForEntity("/api/invoices/extract", new HttpEntity<>(body, headers), String.class);
-        assertThat(legacy.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
-        assertThat(json(legacy.getBody()).get("message").asText()).contains("Daily Gemini quota");
-        assertThat(jdbc.queryForObject("select count(*) from gemini_call_attempts where model_id = ?", Integer.class, MODEL))
-                .isEqualTo(before);
+        // The monitor names the exhausted budget and counts the waiting invoices (counts only, no content).
+        assertThat(status.at("/quota/dailyBudgetExhausted").asBoolean()).isTrue();
+        assertThat(status.at("/quota/rpdBudget").isNumber()).isTrue();
+        assertThat(status.at("/deferredQueuedInvoices").asLong()).isGreaterThanOrEqualTo(1);
+        assertThat(status.has("queuedWithoutFreeTierConsent")).isTrue();
+        assertThat(status.has("lastExtractionError")).isTrue();
+        assertThat(status.has("onlyInvoiceIds")).as("there is no invoice-id allowlist any more").isFalse();
 
         // Leave nothing QUEUED behind for other test classes (they use another model, so this pause does not affect them).
         jdbc.update("update extraction_jobs set next_attempt_at = next_attempt_at - interval '3 days' where invoice_id in (?, ?)",

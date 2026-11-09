@@ -4,7 +4,8 @@ info:
   version: 0.0.1-SNAPSHOT
   description: |
     API-only backend for invoice upload, Gemini extraction, human review and approval.
-    Written by hand from the source code (no springdoc dependency); updated 2026-10-28 for the Bearer-token release.
+    Written by hand from the source code (no springdoc dependency); updated 2026-11-09 (free-tier-only Gemini queue;
+    the direct POST /api/invoices/extract was removed - PDFs enter through batch uploads, one file per request).
     The prose reference with business rules, side effects and tests is docs/REACT_BACKEND_HANDOFF.md; if the two
     disagree, the code is right.
 
@@ -310,22 +311,6 @@ paths:
       parameters: [ { $ref: '#/components/parameters/Id' } ]
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DecisionRequest' } } } }
       responses: { '200': { $ref: '#/components/responses/Invoice' }, '400': { $ref: '#/components/responses/Error' }, '404': { $ref: '#/components/responses/Error' }, '409': { $ref: '#/components/responses/Error' } }
-  /api/invoices/extract:
-    post:
-      tags: [admin]
-      summary: 'LEGACY single-file extraction (ADMIN; calls Gemini synchronously; 409 when switched off)'
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema: { type: object, required: [file], properties: { file: { type: string, format: binary } } }
-      responses:
-        '201': { description: Extracted and stored, content: { application/json: { schema: { $ref: '#/components/schemas/Invoice' } } } }
-        '400': { $ref: '#/components/responses/Error' }
-        '409': { $ref: '#/components/responses/Error' }
-        '422': { $ref: '#/components/responses/Error' }
-        '429': { $ref: '#/components/responses/Error' }
-        '502': { $ref: '#/components/responses/Error' }
 
   /api/categories:
     get:
@@ -560,6 +545,7 @@ components:
         label: { type: string, maxLength: 255 }
         defaultCategoryCode: { type: string, nullable: true }
         source: { type: string, enum: [LOCAL, GOOGLE_DRIVE, ONEDRIVE], default: LOCAL }
+        freeTierProcessingConsent: { type: boolean, default: false, description: "Uploader states every file of this batch has no personal, sensitive or confidential information and may be processed by the Gemini FREE tier. Only such invoices are ever sent to Gemini (free tier). An attestation, not a content check. Cannot be changed later." }
     BatchSummary:
       type: object
       properties:
@@ -573,6 +559,8 @@ components:
         rejectedCount: { type: integer }
         createdAt: { type: string }
         closedAt: { type: string, nullable: true }
+        freeTierProcessingConsent: { type: boolean }
+        freeTierProcessingConsentAt: { type: string, nullable: true }
     BatchDetail:
       type: object
       properties:
@@ -938,6 +926,7 @@ components:
                   reportedTotalTokens: { type: integer, format: int64 }
     QuotaStatus:
       type: object
+      description: 'Free-tier Gemini quota as seen by this application (counts only; Google counts per project). Budgets are limit x safety margin.'
       properties:
         configured: { type: boolean }
         configurationProblem: { type: string, nullable: true }
@@ -949,19 +938,37 @@ components:
         requestsLastMinute: { type: integer, format: int64 }
         inputTokensLastMinute: { type: integer, format: int64 }
         requestsSinceDailyReset: { type: integer, format: int64 }
-        pausedUntil: { type: string, nullable: true }
+        pausedUntil: { type: string, nullable: true, description: 'Daily (RPD) pause until midnight Pacific time, else null' }
         nextDailyReset: { type: string, nullable: true }
         estimatedInputTokensPerCall: { type: integer }
+        inputTokensSinceDailyReset: { type: integer, format: int64 }
+        outputTokensSinceDailyReset: { type: integer, format: int64, description: 'Gemini-reported candidates + thoughts tokens' }
+        totalTokensSinceDailyReset: { type: integer, format: int64 }
+        minuteRequestBudgetExhausted: { type: boolean }
+        minuteTokenBudgetExhausted: { type: boolean }
+        dailyBudgetExhausted: { type: boolean }
+        rateLimitCooldownUntil: { type: string, nullable: true, description: 'Set while a per-minute 429 from Gemini holds the queue' }
+        rpmBudget: { type: integer, nullable: true }
+        tpmBudget: { type: integer, nullable: true }
+        rpdBudget: { type: integer, nullable: true }
     QueueStatus:
       type: object
       properties:
         workerEnabled: { type: boolean }
         workerRunning: { type: boolean }
-        geminiMode: { type: string, enum: [NOT_CONFIRMED, PAID, FREE_TIER_TEST, LOCAL_DEMO, CONFLICT], description: 'Data-policy mode of Gemini extraction (never secret)' }
+        geminiMode: { type: string, enum: [NOT_CONFIRMED, FREE_TIER_AUTO_QUEUE], description: 'Free-tier queue confirmed or not (there is no paid mode; never secret)' }
         geminiKeyConfigured: { type: boolean, description: 'Presence only, never the value' }
-        onlyInvoiceIds: { type: array, items: { type: integer, format: int64 } }
         idleReason: { type: string, nullable: true }
         quota: { $ref: '#/components/schemas/QuotaStatus' }
+        workerState:
+          type: string
+          enum: [DISABLED, GEMINI_KEY_MISSING, MODE_NOT_CONFIRMED, LIMITS_NOT_CONFIGURED, DAILY_QUOTA_PAUSED, WORKER_ERROR, WAITING_FOR_QUOTA, IDLE_NO_ELIGIBLE_INVOICE, PROCESSING_AVAILABLE]
+          description: 'Why the worker is (not) moving; idleReason has the text. Treat unknown values as other'
+        eligibleQueuedInvoices: { type: integer, format: int64, description: 'QUEUED invoices with free-tier consent that can start now (count only)' }
+        deferredQueuedInvoices: { type: integer, format: int64, description: 'QUEUED invoices with free-tier consent waiting for a later time (retry back-off, 429 or daily-quota deferral)' }
+        resumeAt: { type: string, nullable: true, description: 'End of a known quota wait (daily pause, 429 cool-down or pacing)' }
+        queuedWithoutFreeTierConsent: { type: integer, format: int64, description: 'QUEUED invoices uploaded without free-tier consent - never sent to Gemini' }
+        lastExtractionError: { type: string, nullable: true, description: 'Error code, invoice id and time of the last failed extraction - never a provider message, key or invoice content' }
     IntakeRow:
       type: object
       properties:
@@ -972,10 +979,13 @@ components:
         categoryCode: { type: string, nullable: true }
         status: { $ref: '#/components/schemas/InvoiceStatus' }
         stage: { type: string, enum: [WAITING_FOR_EXTRACTION, EXTRACTING, READY_FOR_REVIEW] }
+        extractionState: { type: string, enum: [WAITING_FOR_EXTRACTION, WAITING_FOR_QUOTA, MISSING_FREE_TIER_CONSENT, EXTRACTING, READY_FOR_REVIEWER_ASSIGNMENT, READY_FOR_REVIEW] }
+        freeTierProcessingConsent: { type: boolean }
         uploadedAt: { type: string }
         assignedReviewerId: { type: integer, format: int64, nullable: true }
         assignedReviewerName: { type: string, nullable: true }
         extractionAttempts: { type: integer, nullable: true }
+        nextAttemptAt: { type: string, nullable: true }
         blockedReason: { type: string, nullable: true }
     IntakeBoard:
       type: object
@@ -986,8 +996,7 @@ components:
             enabled: { type: boolean }
             running: { type: boolean }
             idleReason: { type: string, nullable: true }
-            onlyInvoiceIds: { type: array, items: { type: integer, format: int64 } }
-            onlyInvoiceIdsProblems: { type: array, items: { type: string } }
+            resumeAt: { type: string, nullable: true }
         counts:
           type: object
           properties:
@@ -996,6 +1005,10 @@ components:
             assigned: { type: integer }
             assignedWaitingForExtraction: { type: integer }
             assignedReadyForReview: { type: integer }
+            missingFreeTierConsent: { type: integer }
+            waitingForQuota: { type: integer }
+            extracting: { type: integer }
+            extractionFailed: { type: integer, format: int64, description: 'FAILED batch invoices (listed in their own section)' }
         needsAssignment: { type: array, items: { $ref: '#/components/schemas/IntakeRow' } }
         assigned: { type: array, items: { $ref: '#/components/schemas/IntakeRow' } }
         definition: { type: string }

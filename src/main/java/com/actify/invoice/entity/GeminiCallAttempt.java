@@ -19,7 +19,7 @@ import javax.persistence.UniqueConstraint;
 import java.time.LocalDateTime;
 
 /**
- * ONE row per real HTTP call to Gemini (worker AND the legacy /extract endpoint). Written BEFORE the call
+ * ONE row per real HTTP call to Gemini (made only by the queue worker). Written BEFORE the call
  * (outcome IN_FLIGHT, so a crash still counts against the quota) and completed after it.
  *
  * Token columns hold what Gemini REPORTED (usageMetadata) and stay null when it reported nothing.
@@ -32,6 +32,7 @@ import java.time.LocalDateTime;
         indexes = @Index(name = "ix_gemini_attempts_started", columnList = "started_at"))
 public class GeminiCallAttempt {
 
+    /** LEGACY_EXTRACT only appears on historical rows: the direct /api/invoices/extract endpoint was removed. */
     public enum Caller { WORKER, LEGACY_EXTRACT }
 
     public enum Outcome { IN_FLIGHT, SUCCESS, RETRYABLE_ERROR, DAILY_QUOTA, PERMANENT_ERROR, UNKNOWN }

@@ -20,6 +20,8 @@
 --       given a readable name instead of Hibernate's generated one.
 --   The ONLY addition not found in any of those: ix_invoice_items_invoice (PostgreSQL does not index foreign keys,
 --       and every invoice read loads its items by invoice_id). It changes no data and no validation result.
+--   upload_batches.free_tier_consent / free_tier_consent_at and ck_upload_batches_free_tier_consent: copied from
+--       free-tier-consent-migration.sql (2026-10-30), so a fresh database matches a migrated one.
 --
 -- Run it only with psql and ON_ERROR_STOP, as the database owner, against the EMPTY target database:
 --     psql -v ON_ERROR_STOP=1 -X -d "<connection>" -f invoice-process-bootstrap-schema.sql
@@ -106,7 +108,11 @@ CREATE TABLE public.upload_batches (
     rejections            jsonb        NOT NULL,   -- [{fileName, code, message}] - never file content
     created_at            timestamp without time zone NOT NULL,
     closed_at             timestamp without time zone,
-    CONSTRAINT fk_upload_batches_owner_user FOREIGN KEY (owner_user_id) REFERENCES public.app_users(id)
+    -- The uploader's explicit free-tier consent (same definition as free-tier-consent-migration.sql).
+    free_tier_consent     boolean      NOT NULL DEFAULT false,
+    free_tier_consent_at  timestamp without time zone,
+    CONSTRAINT fk_upload_batches_owner_user FOREIGN KEY (owner_user_id) REFERENCES public.app_users(id),
+    CONSTRAINT ck_upload_batches_free_tier_consent CHECK (free_tier_consent = (free_tier_consent_at IS NOT NULL))
 );
 CREATE INDEX ix_upload_batches_owner ON public.upload_batches (owner_user_id, id);
 

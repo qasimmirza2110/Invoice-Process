@@ -1,24 +1,16 @@
 package com.actify.invoice.controller;
 
 import com.actify.invoice.dto.InvoiceResponse;
-import com.actify.invoice.exception.WorkflowConflictException;
 import com.actify.invoice.security.InvoiceAccessPolicy;
 import com.actify.invoice.service.InvoiceService;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.multipart.MultipartFile;
 
 /**
- * HTTP layer only: receives the request and hands the work to InvoiceService.
- * Who may call it: POST /extract is ADMIN-only (SecurityConfig); GET /{id} asks InvoiceAccessPolicy first.
+ * HTTP layer only: GET /{id} asks InvoiceAccessPolicy first, then InvoiceService.
+ * There is no direct extraction endpoint: PDFs enter through batch uploads and only the queue worker calls Gemini.
  */
 @RestController
 @RequestMapping("/api/invoices")
@@ -26,28 +18,10 @@ public class InvoiceController {
 
     private final InvoiceService invoiceService;
     private final InvoiceAccessPolicy accessPolicy;
-    private final boolean legacyExtractEnabled;
-    private final boolean freeTierTest;
 
-    public InvoiceController(InvoiceService invoiceService, InvoiceAccessPolicy accessPolicy,
-                             @Value("${invoice.legacy-extract.enabled:true}") boolean legacyExtractEnabled,
-                             @Value("${invoice.gemini.free-tier-test-confirmed:false}") boolean freeTierTest) {
+    public InvoiceController(InvoiceService invoiceService, InvoiceAccessPolicy accessPolicy) {
         this.invoiceService = invoiceService;
         this.accessPolicy = accessPolicy;
-        this.legacyExtractEnabled = legacyExtractEnabled;
-        this.freeTierTest = freeTierTest;
-    }
-
-    @PostMapping(value = "/extract", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<InvoiceResponse> extract(@RequestParam("file") MultipartFile file) {
-        // Off in the local demo and always in the free-tier test (SchemaSafetyGuard also refuses that combination):
-        // it would call Gemini for any file, outside the worker's invoice allowlist (409).
-        if (!legacyExtractEnabled || freeTierTest) {
-            throw new WorkflowConflictException("The legacy single-file extraction is switched off here. Vendors upload "
-                    + "PDFs on their page; the extraction worker processes them.");
-        }
-        InvoiceResponse response = invoiceService.extractAndSave(file);
-        return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
     @GetMapping("/{id}")

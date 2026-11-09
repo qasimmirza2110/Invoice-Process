@@ -133,22 +133,7 @@ class AuthPgIntegrationTest extends AbstractPgIntegrationTest {
         r.setItems(Collections.singletonList(new InvoiceItemDto("Item", BigDecimal.ONE, new BigDecimal("100.00"),
                 new BigDecimal("18"), new BigDecimal("100.00"))));
         r.setRawResponse("{\"synthetic\":true}");
-        when(llmInvoiceExtractor.extract(any(byte[].class))).thenReturn(new LlmExtractionResponse(r, null));
-
-        byte[] pdf = TestPdfs.onePage("auth test " + UUID.randomUUID());
-        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
-        body.add("file", new ByteArrayResource(pdf) {
-            @Override
-            public String getFilename() {
-                return "auth-synthetic.pdf";
-            }
-        });
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
-        ResponseEntity<String> response = restTemplate.postForEntity("/api/invoices/extract", new HttpEntity<>(body, headers), String.class);
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
-        JsonNode invoice = objectMapper.readTree(response.getBody());
-        return invoice.get("id").asLong();
+        return seedLegacyInvoice(r, TestPdfs.onePage("auth test " + UUID.randomUUID()), "auth-synthetic.pdf");
     }
 
     private ResponseEntity<String> withBearer(HttpMethod method, String url, String token) {

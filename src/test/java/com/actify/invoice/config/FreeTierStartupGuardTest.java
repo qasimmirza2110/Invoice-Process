@@ -10,6 +10,7 @@ import org.springframework.core.env.MapPropertySource;
 import org.springframework.core.env.SystemEnvironmentPropertySource;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.support.PropertiesLoaderUtils;
+import org.springframework.mock.env.MockEnvironment;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -26,8 +27,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * SchemaSafetyGuard rule 4 for a hosted start (profile "render", the real application.properties and
- * application-render.properties, an approved database): the paid-tier requirement cannot be switched off, the paid and
- * free-tier confirmations exclude each other, and FREE_TIER_TEST is accepted only fully restricted. Every refusal
+ * application-render.properties, an approved database) and for the local demo: the free-tier queue is either off or
+ * fully restricted (key, official endpoint, gemini-3.5-flash-lite, usable limits, safety margin, even pacing). There is
+ * no paid mode and no invoice-id allowlist; left-over variables of the removed modes switch nothing on. Every refusal
  * happens before the DataSource exists and never shows the key. No database, no Gemini.
  */
 class FreeTierStartupGuardTest {
@@ -40,11 +42,11 @@ class FreeTierStartupGuardTest {
     private static final String[] HOSTED = {"INVOICE_DB_URL", DB_URL, "INVOICE_LIVE_START_APPROVED", "true",
             "INVOICE_APPROVED_DATABASE", DB_PIN};
 
-    /** A complete, valid free-tier test as proposed for Render (well below the reported ceilings). */
-    private static final String[] FREE_TIER = {"INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED", "true",
+    /** A complete free-tier queue for Render: no invoice id anywhere; example limits (the real ones come from AI Studio). */
+    private static final String[] AUTO_QUEUE = {"INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED", "true",
             "GEMINI_API_KEY", FAKE_KEY, "GEMINI_MODEL", "gemini-3.5-flash-lite", "GEMINI_LIMIT_RPM", "5",
-            "GEMINI_LIMIT_TPM", "50000", "GEMINI_LIMIT_RPD", "20", "GEMINI_INITIAL_TOKEN_ESTIMATE", "5000",
-            "INVOICE_WORKER_ENABLED", "true", "INVOICE_WORKER_ONLY_INVOICE_IDS", "17"};
+            "GEMINI_LIMIT_TPM", "50000", "GEMINI_LIMIT_RPD", "20", "GEMINI_INITIAL_TOKEN_ESTIMATE", "1033",
+            "INVOICE_WORKER_ENABLED", "true"};
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withUserConfiguration(SchemaSafetyGuard.class, SchemaSafetyGuardTest.ProbeDataSourceConfig.class);
@@ -56,15 +58,25 @@ class FreeTierStartupGuardTest {
 
     /** application.properties overlaid with application-render.properties, profile "render", as on Render. */
     private ApplicationContextRunner hosted(String... environmentVariables) throws Exception {
+        return withProfile("render", "application-render.properties", concat(HOSTED, environmentVariables));
+    }
+
+    /** application.properties overlaid with application-localdemo.properties, profile "localdemo". */
+    private ApplicationContextRunner localDemo(String... environmentVariables) throws Exception {
+        return withProfile(SchemaSafetyGuard.LOCAL_DEMO_PROFILE, "application-localdemo.properties", environmentVariables);
+    }
+
+    private ApplicationContextRunner withProfile(String profile, String profileFile, String[] environmentVariables)
+            throws Exception {
         Properties merged = PropertiesLoaderUtils.loadProperties(new ClassPathResource("application.properties"));
-        merged.putAll(PropertiesLoaderUtils.loadProperties(new ClassPathResource("application-render.properties")));
+        merged.putAll(PropertiesLoaderUtils.loadProperties(new ClassPathResource(profileFile)));
         List<String> pairs = new ArrayList<>();
         for (Map.Entry<Object, Object> e : merged.entrySet()) {
             pairs.add(e.getKey() + "=" + e.getValue());
         }
-        return runner.withInitializer(c -> c.getEnvironment().setActiveProfiles("render"))
+        return runner.withInitializer(c -> c.getEnvironment().setActiveProfiles(profile))
                 .withPropertyValues(pairs.toArray(new String[0]))
-                .withInitializer(environment(concat(HOSTED, environmentVariables)));
+                .withInitializer(environment(environmentVariables));
     }
 
     /** OS environment variables, with the same relaxed name mapping Spring uses for real ones (FOO_BAR -> foo.bar). */
@@ -83,13 +95,13 @@ class FreeTierStartupGuardTest {
         return all;
     }
 
-    /** FREE_TIER with one variable replaced (null = removed). */
-    private static String[] freeTierWith(String key, String value) {
+    /** AUTO_QUEUE with one variable replaced (null = removed). */
+    private static String[] autoQueueWith(String key, String value) {
         List<String> pairs = new ArrayList<>();
-        for (int i = 0; i < FREE_TIER.length; i += 2) {
-            if (!FREE_TIER[i].equals(key)) {
-                pairs.add(FREE_TIER[i]);
-                pairs.add(FREE_TIER[i + 1]);
+        for (int i = 0; i < AUTO_QUEUE.length; i += 2) {
+            if (!AUTO_QUEUE[i].equals(key)) {
+                pairs.add(AUTO_QUEUE[i]);
+                pairs.add(AUTO_QUEUE[i + 1]);
             }
         }
         if (value != null) {
@@ -126,158 +138,121 @@ class FreeTierStartupGuardTest {
     // ---- defaults: extraction stays off ----
 
     @Test
-    void theShippedConfigurationKeepsEveryExtractionSwitchOff() throws Exception {
+    void theShippedConfigurationKeepsExtractionOffAndHasNoPaidOrAllowlistSetting() throws Exception {
         Properties main = PropertiesLoaderUtils.loadProperties(new ClassPathResource("application.properties"));
         Properties render = PropertiesLoaderUtils.loadProperties(new ClassPathResource("application-render.properties"));
+        Properties demo = PropertiesLoaderUtils.loadProperties(new ClassPathResource("application-localdemo.properties"));
         assertThat(main.getProperty("invoice.worker.enabled")).isEqualTo("${INVOICE_WORKER_ENABLED:false}");
         assertThat(render.getProperty("invoice.worker.enabled")).isEqualTo("${INVOICE_WORKER_ENABLED:false}");
-        assertThat(main.getProperty(SchemaSafetyGuard.REQUIRE_PAID_TIER_PROPERTY)).isEqualTo("true");
-        assertThat(main.getProperty(SchemaSafetyGuard.PAID_TIER_CONFIRMED_PROPERTY))
-                .isEqualTo("${INVOICE_GEMINI_PAID_TIER_CONFIRMED:false}");
-        assertThat(main.getProperty(SchemaSafetyGuard.FREE_TIER_TEST_PROPERTY))
-                .isEqualTo("${INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED:false}");
-        assertThat(render.getProperty(SchemaSafetyGuard.LEGACY_EXTRACT_PROPERTY))
-                .isEqualTo("${INVOICE_LEGACY_EXTRACT_ENABLED:false}");
+        assertThat(main.getProperty(SchemaSafetyGuard.FREE_TIER_AUTO_QUEUE_PROPERTY))
+                .isEqualTo("${INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED:false}");
         assertThat(main.getProperty("gemini.base-url")).isEqualTo(SchemaSafetyGuard.OFFICIAL_GEMINI_BASE_URL);
+        assertThat(main.getProperty("gemini.model")).isEqualTo("${GEMINI_MODEL:gemini-3.5-flash-lite}");
+        for (Properties p : new Properties[]{main, render, demo}) {
+            for (String key : p.stringPropertyNames()) {
+                String entry = (key + "=" + p.getProperty(key)).toLowerCase();
+                assertThat(entry).as(key).doesNotContain("paid").doesNotContain("only-invoice-ids")
+                        .doesNotContain("only_invoice_ids").doesNotContain("legacy-extract")
+                        .doesNotContain("free-tier-test").doesNotContain("data-use-acknowledged");
+            }
+        }
 
         hosted().run(context -> {
             assertStarted(context);
             assertThat(context.getEnvironment().getProperty("invoice.worker.enabled", Boolean.class)).isFalse();
-            assertThat(context.getEnvironment().getProperty(SchemaSafetyGuard.FREE_TIER_TEST_PROPERTY, Boolean.class)).isFalse();
+            assertThat(context.getEnvironment().getProperty(SchemaSafetyGuard.FREE_TIER_AUTO_QUEUE_PROPERTY, Boolean.class))
+                    .isFalse();
         });
     }
 
+    // ---- the free-tier queue ----
+
     @Test
-    void aCompleteFreeTierTestStartsAndAlsoAtTheReportedCeilings() throws Exception {
-        hosted(FREE_TIER).run(FreeTierStartupGuardTest::assertStarted);
+    void aCompleteFreeTierQueueStartsWithoutAnyInvoiceId() throws Exception {
+        hosted(AUTO_QUEUE).run(FreeTierStartupGuardTest::assertStarted);
+        // Other limits read from AI Studio are accepted as configured - the application assumes no fixed quota.
         DATA_SOURCE_CREATED.set(false);
-        hosted(concat(freeTierWith("GEMINI_LIMIT_RPM", "15"), "GEMINI_LIMIT_TPM", "250000", "GEMINI_LIMIT_RPD", "500"))
-                .run(FreeTierStartupGuardTest::assertStarted);
-        DATA_SOURCE_CREATED.set(false);
-        // The restrictions hold whether or not the worker is switched on.
-        hosted(freeTierWith("INVOICE_WORKER_ENABLED", null)).run(FreeTierStartupGuardTest::assertStarted);
-    }
-
-    // ---- the two confirmations ----
-
-    @Test
-    void paidAndFreeTierConfirmationsCannotBeCombined() throws Exception {
-        assertRefusedWith("both", "are both true", concat(FREE_TIER, "INVOICE_GEMINI_PAID_TIER_CONFIRMED", "true"));
-        assertRefusedWith("both, other spellings", "are both true",
-                concat(freeTierWith("INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED", "on"), "INVOICE_GEMINI_PAID_TIER_CONFIRMED", "yes"));
-    }
-
-    @Test
-    void thePaidTierRequirementCannotBeSwitchedOffOutsideTheLocalDemo() throws Exception {
-        for (String off : new String[]{"false", "FALSE", "no", "off", "0"}) {
-            assertRefusedWith("require-paid-tier=" + off, "must stay true outside the local demo",
-                    "INVOICE_GEMINI_REQUIRE_PAID_TIER", off);
-        }
-        assertRefusedWith("free tier + require off", "must stay true outside the local demo",
-                concat(FREE_TIER, "INVOICE_GEMINI_REQUIRE_PAID_TIER", "false"));
-        assertRefusedWith("unreadable flag", "must be true or false", "INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED", "maybe");
-    }
-
-    @Test
-    void paidModeOnItsOwnIsUnchangedAndNeedsNoAllowlist() throws Exception {
-        hosted("INVOICE_GEMINI_PAID_TIER_CONFIRMED", "true", "GEMINI_API_KEY", FAKE_KEY, "INVOICE_WORKER_ENABLED", "true")
+        hosted(concat(autoQueueWith("GEMINI_LIMIT_RPM", "30"), "GEMINI_LIMIT_TPM", "1000000", "GEMINI_LIMIT_RPD", "1500"))
                 .run(FreeTierStartupGuardTest::assertStarted);
     }
 
-    // ---- exactly one invoice ----
-
     @Test
-    void theFreeTierTestNeedsExactlyOneInvoiceId() throws Exception {
-        String[] refused = {"", " ", "17,18", "17, 18", "17 18", "abc", "0", "-1", "17;18", "1e3", "*"};
-        for (String ids : refused) {
-            assertRefusedWith("ids '" + ids + "'", "exactly ONE invoice", freeTierWith("INVOICE_WORKER_ONLY_INVOICE_IDS", ids));
-        }
-        assertRefusedWith("no ids", "exactly ONE invoice", freeTierWith("INVOICE_WORKER_ONLY_INVOICE_IDS", null));
-        assertRefusedWith("no ids, worker off", "exactly ONE invoice",
-                concat(freeTierWith("INVOICE_WORKER_ONLY_INVOICE_IDS", null), "INVOICE_WORKER_ENABLED", "false"));
-        // "yes" switches the mode on exactly as "true" would (the @Value conversion) - so it is checked the same way.
-        assertRefusedWith("'yes' spelling", "exactly ONE invoice",
-                concat(freeTierWith("INVOICE_WORKER_ONLY_INVOICE_IDS", null), "INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED", "yes"));
+    void obsoleteVariablesOfRemovedModesNeitherStartAPaidPathNorBlockTheStartAndAreReported() throws Exception {
+        String[] leftovers = {"INVOICE_GEMINI_PAID_TIER_CONFIRMED", "true", "INVOICE_GEMINI_REQUIRE_PAID_TIER", "false",
+                "INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED", "true", "INVOICE_GEMINI_FREE_TIER_DATA_USE_ACKNOWLEDGED", "true",
+                "INVOICE_WORKER_ONLY_INVOICE_IDS", "17", "INVOICE_LEGACY_EXTRACT_ENABLED", "true"};
+        hosted(concat(AUTO_QUEUE, leftovers)).run(context -> {
+            assertStarted(context);
+            assertThat(SchemaSafetyGuard.obsoleteSettings(context.getEnvironment())).containsExactlyInAnyOrder(
+                    "INVOICE_GEMINI_PAID_TIER_CONFIRMED", "INVOICE_GEMINI_REQUIRE_PAID_TIER",
+                    "INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED", "INVOICE_GEMINI_FREE_TIER_DATA_USE_ACKNOWLEDGED",
+                    "INVOICE_WORKER_ONLY_INVOICE_IDS", "INVOICE_LEGACY_EXTRACT_ENABLED");
+        });
+        // Without the free-tier confirmation the leftovers switch nothing on (and do not block the start).
         DATA_SOURCE_CREATED.set(false);
-        hosted(freeTierWith("INVOICE_WORKER_ONLY_INVOICE_IDS", " 42 ")).run(FreeTierStartupGuardTest::assertStarted);
-    }
-
-    // ---- key, endpoint, model ----
-
-    @Test
-    void theFreeTierTestNeedsAKey() throws Exception {
-        assertRefusedWith("no key", "GEMINI_API_KEY is not set", freeTierWith("GEMINI_API_KEY", null));
+        hosted(leftovers).run(context -> {
+            assertStarted(context);
+            assertThat(context.getEnvironment().getProperty(SchemaSafetyGuard.FREE_TIER_AUTO_QUEUE_PROPERTY, Boolean.class))
+                    .isFalse();
+        });
+        assertThat(SchemaSafetyGuard.obsoleteSettings(new MockEnvironment())).isEmpty();
     }
 
     @Test
-    void theKeyMayOnlyGoToTheOfficialEndpoint() throws Exception {
+    void theFreeTierQueueNeedsAKeyAndOnlyTheOfficialEndpoint() throws Exception {
+        assertRefusedWith("no key", "GEMINI_API_KEY is not set", autoQueueWith("GEMINI_API_KEY", null));
         assertRefusedWith("other endpoint", "may only be sent to",
-                concat(FREE_TIER, "GEMINI_BASE_URL", "https://attacker.example.test/v1beta"));
+                concat(AUTO_QUEUE, "GEMINI_BASE_URL", "https://proxy.example.test/v1beta"));
         assertRefusedWith("http endpoint", "may only be sent to",
-                concat(FREE_TIER, "GEMINI_BASE_URL", "http://generativelanguage.googleapis.com/v1beta"));
+                concat(AUTO_QUEUE, "GEMINI_BASE_URL", "http://generativelanguage.googleapis.com/v1beta"));
+        assertRefusedWith("unreadable flag", "must be true or false", "INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED", "maybe");
     }
 
     @Test
-    void theModelMustBeTheOneWhoseFreeTierLimitsWereReported() throws Exception {
-        assertRefusedWith("no model", "GEMINI_MODEL=gemini-3.5-flash-lite", freeTierWith("GEMINI_MODEL", null));
-        assertRefusedWith("other model", "GEMINI_MODEL=gemini-3.5-flash-lite", freeTierWith("GEMINI_MODEL", "gemini-3.5-pro"));
+    void theModelMustBeGemini35FlashLite() throws Exception {
+        assertRefusedWith("model not explicit", "needs GEMINI_MODEL=gemini-3.5-flash-lite", autoQueueWith("GEMINI_MODEL", null));
+        assertRefusedWith("other model", "needs GEMINI_MODEL=gemini-3.5-flash-lite",
+                autoQueueWith("GEMINI_MODEL", "gemini-3.5-pro"));
         DATA_SOURCE_CREATED.set(false);
-        hosted(FREE_TIER).withInitializer(c -> c.getEnvironment().getPropertySources().addFirst(new MapPropertySource(
+        hosted(AUTO_QUEUE).withInitializer(c -> c.getEnvironment().getPropertySources().addFirst(new MapPropertySource(
                         "command-line", Collections.<String, Object>singletonMap("gemini.model", "some-other-model"))))
                 .run(context -> assertRefused(context, "model overridden elsewhere", "nothing else may override"));
     }
 
-    // ---- limits ----
-
-    @Test
-    void limitsMayNotExceedTheReportedFreeTierCeilings() throws Exception {
-        assertRefusedWith("rpm 16", "may not exceed 15 / 250000 / 500", freeTierWith("GEMINI_LIMIT_RPM", "16"));
-        assertRefusedWith("tpm 250001", "may not exceed 15 / 250000 / 500", freeTierWith("GEMINI_LIMIT_TPM", "250001"));
-        assertRefusedWith("rpd 501", "may not exceed 15 / 250000 / 500", freeTierWith("GEMINI_LIMIT_RPD", "501"));
-        assertRefusedWith("rpd 1000", "may not exceed 15 / 250000 / 500", freeTierWith("GEMINI_LIMIT_RPD", "1000"));
-    }
-
     @Test
     void limitsMustBeWholePositiveNumbers() throws Exception {
-        assertRefusedWith("no rpm", "GEMINI_LIMIT_RPM", freeTierWith("GEMINI_LIMIT_RPM", null));
-        assertRefusedWith("250k", "GEMINI_LIMIT_TPM", freeTierWith("GEMINI_LIMIT_TPM", "250k"));
-        assertRefusedWith("rpd 0", "GEMINI_LIMIT_RPD", freeTierWith("GEMINI_LIMIT_RPD", "0"));
-        assertRefusedWith("no estimate", "GEMINI_INITIAL_TOKEN_ESTIMATE", freeTierWith("GEMINI_INITIAL_TOKEN_ESTIMATE", null));
+        assertRefusedWith("no rpm", "GEMINI_LIMIT_RPM", autoQueueWith("GEMINI_LIMIT_RPM", null));
+        assertRefusedWith("250k", "GEMINI_LIMIT_TPM", autoQueueWith("GEMINI_LIMIT_TPM", "250k"));
+        assertRefusedWith("no rpd", "GEMINI_LIMIT_RPD", autoQueueWith("GEMINI_LIMIT_RPD", null));
+        assertRefusedWith("rpd 0", "GEMINI_LIMIT_RPD", autoQueueWith("GEMINI_LIMIT_RPD", "0"));
+        assertRefusedWith("no estimate", "GEMINI_INITIAL_TOKEN_ESTIMATE", autoQueueWith("GEMINI_INITIAL_TOKEN_ESTIMATE", null));
     }
 
     @Test
     void theSafetyMarginAndEvenPacingCannotBeLoosened() throws Exception {
         assertRefusedWith("margin 0.9", "safety-margin may not be above 0.8",
-                concat(FREE_TIER, "GEMINI_LIMITS_SAFETY_MARGIN", "0.9"));
-        assertRefusedWith("margin 1", "safety-margin may not be above 0.8", concat(FREE_TIER, "GEMINI_LIMITS_SAFETY_MARGIN", "1"));
-        assertRefusedWith("no even pacing", "even-pacing must stay true", concat(FREE_TIER, "GEMINI_LIMITS_EVEN_PACING", "false"));
+                concat(AUTO_QUEUE, "GEMINI_LIMITS_SAFETY_MARGIN", "0.9"));
+        assertRefusedWith("margin 1", "safety-margin may not be above 0.8", concat(AUTO_QUEUE, "GEMINI_LIMITS_SAFETY_MARGIN", "1"));
+        assertRefusedWith("no even pacing", "even-pacing must stay true", concat(AUTO_QUEUE, "GEMINI_LIMITS_EVEN_PACING", "false"));
         DATA_SOURCE_CREATED.set(false);
-        hosted(concat(FREE_TIER, "GEMINI_LIMITS_SAFETY_MARGIN", "0.5")).run(FreeTierStartupGuardTest::assertStarted);
+        hosted(concat(AUTO_QUEUE, "GEMINI_LIMITS_SAFETY_MARGIN", "0.5")).run(FreeTierStartupGuardTest::assertStarted);
     }
 
-    // ---- the legacy endpoint ----
+    // ---- the local demo: off by default, the same free-tier rules when opted in ----
 
     @Test
-    void theLegacySingleFileExtractionCannotBypassTheAllowlist() throws Exception {
-        assertRefusedWith("legacy on", "legacy single-file extraction must stay disabled",
-                concat(FREE_TIER, "INVOICE_LEGACY_EXTRACT_ENABLED", "true"));
-        assertRefusedWith("legacy on, other spelling", "legacy single-file extraction must stay disabled",
-                concat(FREE_TIER, "INVOICE_LEGACY_EXTRACT_ENABLED", "yes"));
-    }
-
-    // ---- the local demo keeps its own opt-in ----
-
-    @Test
-    void theLocalDemoRefusesTheHostedFreeTierFlag() throws Exception {
-        Properties merged = PropertiesLoaderUtils.loadProperties(new ClassPathResource("application.properties"));
-        merged.putAll(PropertiesLoaderUtils.loadProperties(new ClassPathResource("application-localdemo.properties")));
-        List<String> pairs = new ArrayList<>();
-        for (Map.Entry<Object, Object> e : merged.entrySet()) {
-            pairs.add(e.getKey() + "=" + e.getValue());
-        }
-        runner.withInitializer(c -> c.getEnvironment().setActiveProfiles(SchemaSafetyGuard.LOCAL_DEMO_PROFILE))
-                .withPropertyValues(pairs.toArray(new String[0]))
-                .withInitializer(environment("INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED", "true"))
-                .run(context -> assertRefused(context, "local demo", "must not set INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED"));
+    void theLocalDemoUsesTheSameFreeTierRulesWhenOptedIn() throws Exception {
+        localDemo(AUTO_QUEUE).run(FreeTierStartupGuardTest::assertStarted);
+        DATA_SOURCE_CREATED.set(false);
+        localDemo(autoQueueWith("GEMINI_MODEL", "gemini-3.5-pro"))
+                .run(context -> assertRefused(context, "local demo, other model", "needs GEMINI_MODEL=gemini-3.5-flash-lite"));
+        DATA_SOURCE_CREATED.set(false);
+        localDemo("GEMINI_API_KEY", FAKE_KEY)
+                .run(context -> assertRefused(context, "local demo key without opt-in", "must not have a Gemini API key"));
+        DATA_SOURCE_CREATED.set(false);
+        localDemo("INVOICE_WORKER_ENABLED", "true")
+                .run(context -> assertRefused(context, "local demo worker without opt-in", "must not enable the extraction worker"));
+        DATA_SOURCE_CREATED.set(false);
+        localDemo().run(FreeTierStartupGuardTest::assertStarted);
     }
 }

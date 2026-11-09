@@ -36,7 +36,8 @@ public class BatchController {
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<BatchSummary> create(@RequestBody CreateBatchRequest body) {
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(intakeService.createBatch(body.getLabel(), body.getDefaultCategoryCode(), body.getSource()));
+                .body(intakeService.createBatch(body.getLabel(), body.getDefaultCategoryCode(), body.getSource(),
+                        Boolean.TRUE.equals(body.getFreeTierProcessingConsent())));
     }
 
     @GetMapping

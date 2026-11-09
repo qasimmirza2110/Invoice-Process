@@ -92,14 +92,14 @@ Spring Boot does not read `.env` files.
 | `GEMINI_MODEL` | no | Default `gemini-3.5-flash-lite`. |
 | `INVOICE_WORKER_ENABLED` | to process the queue | `true` starts the worker… |
 | `GEMINI_LIMIT_RPM`, `GEMINI_LIMIT_TPM`, `GEMINI_LIMIT_RPD`, `GEMINI_INITIAL_TOKEN_ESTIMATE` | for the worker | …but only when these limits (from Google AI Studio, for your project and model) are set. No defaults on purpose. |
-| `INVOICE_GEMINI_PAID_TIER_CONFIRMED` | for extraction outside the local demo | `true` only after checking that the key's Google Cloud project has active billing. Until then nothing is sent to Gemini. |
+| `INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED` | for extraction | `true` only after checking that the key's Google Cloud project has **no** active billing account and accepting the Gemini free-tier data terms. Until then nothing is sent; even then only batches created with `freeTierProcessingConsent=true` are extracted. |
 | `INVOICE_CORS_ALLOWED_ORIGINS` | only for a separately hosted frontend | Exact origins, comma-separated; empty = no CORS. |
 | `INVOICE_TEST_DB_PASSWORD` | `-Ppgtest` only | Test database password, or `pgpass.conf`. |
 
-Gemini and real invoices: on unpaid (free-tier) Gemini API services Google may use the content to improve its products
-and human reviewers may read it (https://ai.google.dev/gemini-api/terms, checked 2026-10-28). Real invoices therefore
-go only to a project with active Cloud Billing, confirmed with `INVOICE_GEMINI_PAID_TIER_CONFIRMED=true`. The local
-demo (synthetic files only) is exempt.
+Gemini: one provider, one model (`gemini-3.5-flash-lite`), **free tier only** - there is no paid mode, no fallback and no
+invoice-id allowlist. On unpaid Gemini API services Google may use the content to improve its products and human
+reviewers may read it (https://ai.google.dev/gemini-api/terms): use synthetic, sanitized or otherwise permitted
+non-confidential documents only. Details, quotas and the Render setup: `docs/RENDER_DEPLOYMENT.md` section 4.
 
 ## 5. Build and test
 

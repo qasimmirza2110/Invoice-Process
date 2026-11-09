@@ -48,11 +48,28 @@ class ExtractionWorkerDecisionTest {
 
     private ExtractionWorker worker(boolean enabled, String apiKey) {
         return new ExtractionWorker(jobs, outcomes, storage, extractor, quotaGuard, limits,
-                new GeminiConfig(apiKey, "test-model", "http://127.0.0.1:9"), enabled);
+                new GeminiConfig(apiKey, "test-model", "http://127.0.0.1:9", true), enabled);
     }
 
     private static ClaimedJob job(int attempt, boolean attemptsLeft) {
         return new ClaimedJob(17L, "doc-uuid", "sha", attempt, attemptsLeft, 500L);
+    }
+
+    @org.junit.jupiter.api.BeforeEach
+    void consentedByDefault() {
+        when(jobs.hasFreeTierConsent(anyLong())).thenReturn(true);
+    }
+
+    @Test
+    void anInvoiceWithoutConsentAtSendTimeIsNeverSentToGemini() {
+        when(jobs.claimNext(anyString())).thenReturn(job(1, true));
+        when(jobs.hasFreeTierConsent(17L)).thenReturn(false);
+
+        assertThat(worker(true, "k").processNextJob()).isTrue();
+
+        verifyNoInteractions(extractor, storage);
+        verify(quotaGuard).complete(eq(500L), eq(Outcome.PERMANENT_ERROR), isNull(), eq("NO_FREE_TIER_CONSENT"), isNull(), anyLong());
+        verify(outcomes).markFailed(eq(17L), eq("NO_FREE_TIER_CONSENT"), anyString(), isNull(), anyLong());
     }
 
     @Test
@@ -100,12 +117,13 @@ class ExtractionWorkerDecisionTest {
     }
 
     @Test
-    void aPerMinute429WaitsAtLeastAsLongAsGoogleAsked() {
+    void aPerMinute429GoesBackToTheQueueForAtLeastAsLongAsGoogleAsked() {
         LocalDateTime before = LocalDateTime.now();
         failWith(new InvoiceExtractionException("429", Kind.HTTP_ERROR, 429, "RESOURCE_EXHAUSTED", null, 600L, null), true);
         org.mockito.ArgumentCaptor<LocalDateTime> next = org.mockito.ArgumentCaptor.forClass(LocalDateTime.class);
-        verify(outcomes).scheduleRetry(eq(17L), eq("HTTP_429"), anyString(), next.capture(), isNull(), anyLong());
-        // our first back-off would be ~30 s; the provider asked for 600 s, so that wins
+        verify(outcomes).deferForRateLimit(eq(17L), eq("HTTP_429"), next.capture(), isNull(), anyLong());
+        verify(outcomes, never()).scheduleRetry(any(), any(), any(), any(), any(), anyLong());
+        // the 60 s cool-down is the minimum; the provider asked for 600 s, so that wins
         assertThat(next.getValue()).isAfterOrEqualTo(before.plusSeconds(600));
     }
 
@@ -176,16 +194,5 @@ class ExtractionWorkerDecisionTest {
         assertThat(status(true, "k").isWorkerRunning(quota(true))).isTrue();
         // The key value itself is never part of any answer.
         assertThat(status(true, "secret-key-value").idleReason(quota(false))).doesNotContain("secret-key-value");
-    }
-
-    // ---- invoice.worker.only-invoice-ids ----
-
-    @Test
-    void theInvoiceAllowListIsParsedStrictly() {
-        assertThat(ExtractionJobService.parseIds("")).isEmpty();
-        assertThat(ExtractionJobService.parseIds(null)).isEmpty();
-        assertThat(ExtractionJobService.parseIds(" 17 , 18")).containsExactly(17L, 18L);
-        assertThatThrownBy(() -> ExtractionJobService.parseIds("17,abc")).isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("INVOICE_WORKER_ONLY_INVOICE_IDS");
     }
 }

@@ -24,9 +24,20 @@ public final class BatchDtos {
         private String defaultCategoryCode;
         /** LOCAL (default when missing), GOOGLE_DRIVE or ONEDRIVE. A cloud source must be configured. */
         private String source;
+        /**
+         * Optional, default false. true = the uploader states that every file of this batch is authorized for the
+         * Gemini FREE tier (no personal, sensitive or confidential information; Google may use the content). Only such
+         * invoices are extracted in FREE_TIER_AUTO_QUEUE mode. Cannot be changed after the batch is created.
+         */
+        private Boolean freeTierProcessingConsent;
 
         public String getSource() { return source; }
         public void setSource(String source) { this.source = source; }
+
+        public Boolean getFreeTierProcessingConsent() { return freeTierProcessingConsent; }
+        public void setFreeTierProcessingConsent(Boolean freeTierProcessingConsent) {
+            this.freeTierProcessingConsent = freeTierProcessingConsent;
+        }
 
         public String getLabel() { return label; }
         public void setLabel(String label) { this.label = label; }
@@ -106,6 +117,8 @@ public final class BatchDtos {
         private final int rejectedCount;
         private final LocalDateTime createdAt;
         private final LocalDateTime closedAt;
+        private final boolean freeTierProcessingConsent;
+        private final LocalDateTime freeTierProcessingConsentAt;
 
         public BatchSummary(UploadBatch b) {
             this.id = b.getId();
@@ -118,6 +131,8 @@ public final class BatchDtos {
             this.rejectedCount = b.getRejectedCount();
             this.createdAt = b.getCreatedAt();
             this.closedAt = b.getClosedAt();
+            this.freeTierProcessingConsent = b.isFreeTierConsent();
+            this.freeTierProcessingConsentAt = b.getFreeTierConsentAt();
         }
 
         public Long getId() { return id; }
@@ -130,6 +145,8 @@ public final class BatchDtos {
         public int getRejectedCount() { return rejectedCount; }
         public LocalDateTime getCreatedAt() { return createdAt; }
         public LocalDateTime getClosedAt() { return closedAt; }
+        public boolean isFreeTierProcessingConsent() { return freeTierProcessingConsent; }
+        public LocalDateTime getFreeTierProcessingConsentAt() { return freeTierProcessingConsentAt; }
     }
 
     /** One invoice of a batch, as the vendor sees it while it moves through the workflow. */

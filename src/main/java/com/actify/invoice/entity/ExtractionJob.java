@@ -92,10 +92,15 @@ public class ExtractionJob {
      * the job simply waits until the daily reset.
      */
     public void waitForDailyReset(LocalDateTime resetAt, String errorCode, String errorMessage) {
+        deferWithoutUsingAttempt(resetAt, errorCode, errorMessage);
+    }
+
+    /** A quota refusal (not this invoice's fault): the attempt is given back and the job waits until nextAttemptAt. */
+    public void deferWithoutUsingAttempt(LocalDateTime nextAttemptAt, String errorCode, String errorMessage) {
         if (attemptCount > 0) {
             attemptCount--;
         }
-        scheduleRetry(resetAt, errorCode, errorMessage);
+        scheduleRetry(nextAttemptAt, errorCode, errorMessage);
     }
 
     public void finish(LocalDateTime now) {

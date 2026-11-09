@@ -71,7 +71,7 @@ class DefaultProfileBootLoadingTest {
             assertThat(env.getProperty("invoice.cors.allowed-origins")).isEmpty();
             assertThat(env.getProperty("invoice.jwt.allow-ephemeral-secret")).isEqualTo("false");
             assertThat(env.getProperty("invoice.worker.enabled")).isEqualTo("false");
-            assertThat(env.getProperty("invoice.legacy-extract.enabled")).isEqualTo("false");
+            assertThat(env.getProperty("invoice.legacy-extract.enabled")).isNull(); // the direct endpoint is gone
             assertThat(env.getProperty("spring.jpa.hibernate.ddl-auto")).isEqualTo("validate");
             assertThat(env.getProperty("invoice.storage.type")).isEqualTo("s3");
             assertThat(env.getProperty("invoice.storage.s3.bucket")).isEqualTo("invoice-documents");
@@ -79,8 +79,8 @@ class DefaultProfileBootLoadingTest {
             assertThat(env.getProperty("spring.datasource.hikari.maximum-pool-size")).isEqualTo("3");
             assertThat(env.getProperty("spring.datasource.hikari.minimum-idle")).isEqualTo("0");
             assertThat(env.getProperty("invoice.storage.verify-on-startup")).isEqualTo("true");
-            assertThat(env.getProperty("invoice.gemini.require-paid-tier")).isEqualTo("true");
-            assertThat(env.getProperty("invoice.gemini.paid-tier-confirmed")).isEqualTo("false");
+            assertThat(env.getProperty("invoice.gemini.require-paid-tier")).isNull(); // no paid mode exists
+            assertThat(env.getProperty("invoice.gemini.free-tier-auto-queue-confirmed")).isEqualTo("false");
             // Not approved -> refused before any connection.
             assertThatThrownBy(() -> SchemaSafetyGuard.check(env)).hasMessageContaining("not approved");
         }
@@ -111,7 +111,7 @@ class DefaultProfileBootLoadingTest {
 
     /**
      * Render-style OS environment variables switch the owner decisions on through relaxed binding; nothing else does.
-     * The local demo keeps the paid-project requirement off (synthetic files only); every other start has it on.
+     * The free-tier confirmation is off in every profile unless the environment sets it.
      */
     @Test
     void ownerDecisionsComeOnlyFromExplicitEnvironmentVariables() {
@@ -119,21 +119,21 @@ class DefaultProfileBootLoadingTest {
         variables.put("SPRING_PROFILES_ACTIVE", "render");
         variables.put("INVOICE_DB_URL", "jdbc:postgresql://db-internal.example:5432/invoice_process_prod");
         variables.put("INVOICE_S3_ENDPOINT", "https://storage.example.com");
-        variables.put("INVOICE_GEMINI_PAID_TIER_CONFIRMED", "true");
+        variables.put("INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED", "true");
         variables.put("INVOICE_S3_BUCKET", "invoice-documents");
         variables.put("INVOICE_CORS_ALLOWED_ORIGINS", "https://invoices.example.com");
         try (ConfigurableApplicationContext context = startWithEnvironment(variables)) {
             Environment env = context.getEnvironment();
-            assertThat(env.getProperty("invoice.gemini.paid-tier-confirmed")).isEqualTo("true");
+            assertThat(env.getProperty("invoice.gemini.free-tier-auto-queue-confirmed")).isEqualTo("true");
             assertThat(env.getProperty("invoice.storage.s3.endpoint")).isEqualTo("https://storage.example.com");
             assertThat(env.getProperty("invoice.storage.s3.bucket")).isEqualTo("invoice-documents");
             assertThat(env.getProperty("invoice.cors.allowed-origins")).isEqualTo("https://invoices.example.com");
         }
         try (ConfigurableApplicationContext context = start()) {
-            assertThat(context.getEnvironment().getProperty("invoice.gemini.require-paid-tier")).isEqualTo("false");
+            assertThat(context.getEnvironment().getProperty("invoice.gemini.free-tier-auto-queue-confirmed")).isEqualTo("false");
         }
         try (ConfigurableApplicationContext context = start("--spring.profiles.active=live")) {
-            assertThat(context.getEnvironment().getProperty("invoice.gemini.require-paid-tier")).isEqualTo("true");
+            assertThat(context.getEnvironment().getProperty("invoice.gemini.free-tier-auto-queue-confirmed")).isEqualTo("false");
         }
     }
 
