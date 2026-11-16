@@ -445,7 +445,9 @@ counts as `value ?? 0`. Rates are fractions 0–1 (multiply by 100 to display) o
 // eligibleQueuedInvoices / deferredQueuedInvoices: consented QUEUED invoices that can start now / that wait for a later time.
 // queuedWithoutFreeTierConsent: QUEUED invoices that are never sent (no free-tier consent).
 // lastExtractionError: error code + invoice id + time of the last failed extraction (e.g. "HTTP_429 (invoice 17) at ..."), or null.
-// REMOVED: "onlyInvoiceIds" (there is no invoice-id allowlist any more). Ignore it if an older server still sends it.
+// DEPRECATED: "onlyInvoiceIds" (and worker.onlyInvoiceIds / worker.onlyInvoiceIdsProblems on GET /api/admin/intake) are
+// still sent but are ALWAYS [] - there is no invoice-id allowlist any more. Existing code that reads them keeps working;
+// new code should ignore them.
 ```
 
 React never triggers extraction and never needs an invoice id from configuration: the backend generates the id and

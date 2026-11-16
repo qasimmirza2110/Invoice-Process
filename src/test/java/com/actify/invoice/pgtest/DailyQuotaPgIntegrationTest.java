@@ -68,7 +68,9 @@ class DailyQuotaPgIntegrationTest extends AbstractQueuePgTest {
         assertThat(status.at("/deferredQueuedInvoices").asLong()).isGreaterThanOrEqualTo(1);
         assertThat(status.has("queuedWithoutFreeTierConsent")).isTrue();
         assertThat(status.has("lastExtractionError")).isTrue();
-        assertThat(status.has("onlyInvoiceIds")).as("there is no invoice-id allowlist any more").isFalse();
+        // No allowlist any more; the field stays as an always-empty array for older React screens.
+        assertThat(status.at("/onlyInvoiceIds").isArray()).isTrue();
+        assertThat(status.at("/onlyInvoiceIds").size()).isZero();
 
         // Leave nothing QUEUED behind for other test classes (they use another model, so this pause does not affect them).
         jdbc.update("update extraction_jobs set next_attempt_at = next_attempt_at - interval '3 days' where invoice_id in (?, ?)",

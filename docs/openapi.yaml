@@ -958,6 +958,7 @@ components:
         workerRunning: { type: boolean }
         geminiMode: { type: string, enum: [NOT_CONFIRMED, FREE_TIER_AUTO_QUEUE], description: 'Free-tier queue confirmed or not (there is no paid mode; never secret)' }
         geminiKeyConfigured: { type: boolean, description: 'Presence only, never the value' }
+        onlyInvoiceIds: { type: array, items: { type: integer, format: int64 }, deprecated: true, description: 'Always empty (the invoice-id allowlist was removed); kept for older clients' }
         idleReason: { type: string, nullable: true }
         quota: { $ref: '#/components/schemas/QuotaStatus' }
         workerState:
@@ -997,6 +998,8 @@ components:
             running: { type: boolean }
             idleReason: { type: string, nullable: true }
             resumeAt: { type: string, nullable: true }
+            onlyInvoiceIds: { type: array, items: { type: integer, format: int64 }, deprecated: true, description: 'Always empty; kept for older clients' }
+            onlyInvoiceIdsProblems: { type: array, items: { type: string }, deprecated: true, description: 'Always empty; kept for older clients' }
         counts:
           type: object
           properties:
