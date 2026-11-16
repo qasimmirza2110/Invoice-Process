@@ -5,6 +5,7 @@ import com.actify.invoice.quota.QuotaStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -31,6 +32,9 @@ public class AdminQueueController {
         result.put("workerRunning", workerStatus.isWorkerRunning(quota));
         result.put("geminiMode", workerStatus.geminiMode().name());
         result.put("geminiKeyConfigured", workerStatus.isGeminiKeyConfigured()); // presence only, never the value
+        // DEPRECATED, always []: the invoice-id allowlist was removed. Kept so React screens built against the earlier
+        // response (which documented "onlyInvoiceIds": []) do not break on a missing array.
+        result.put("onlyInvoiceIds", Collections.emptyList());
         result.put("idleReason", workerStatus.idleReason(quota));
         result.put("quota", quota);
         result.put("workerState", workerStatus.workerState(quota, eligible).name());

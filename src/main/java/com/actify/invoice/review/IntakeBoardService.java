@@ -17,6 +17,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -100,6 +101,10 @@ public class IntakeBoardService {
         worker.put("running", running);
         worker.put("idleReason", running ? idleReason : idleReason == null ? "The extraction worker is not running." : idleReason);
         worker.put("resumeAt", workerStatus.resumeAt(quota));
+        // DEPRECATED, always []: the invoice-id allowlist was removed; kept for React screens built against the earlier
+        // response so they do not break on a missing array.
+        worker.put("onlyInvoiceIds", Collections.emptyList());
+        worker.put("onlyInvoiceIdsProblems", Collections.emptyList());
         result.put("worker", worker);
 
         List<Map<String, Object>> needsAssignment = rows(unassigned, jobs, names, running, idleReason, quotaWait, now);
