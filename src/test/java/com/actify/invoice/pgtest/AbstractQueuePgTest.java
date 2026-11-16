@@ -62,11 +62,17 @@ abstract class AbstractQueuePgTest extends AbstractPgIntegrationTest {
         doThrow(e).when(llmInvoiceExtractor).extract(any(byte[].class));
     }
 
+    /** A batch WITH free-tier consent: only such batches are ever extracted (the normal case in these tests). */
     protected long createBatch(String label) throws Exception {
+        return createBatch(label, true);
+    }
+
+    protected long createBatch(String label, boolean freeTierProcessingConsent) throws Exception {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         ResponseEntity<String> created = restTemplate.postForEntity("/api/batches",
-                new HttpEntity<>("{\"label\":\"" + label + "\"}", headers), String.class);
+                new HttpEntity<>("{\"label\":\"" + label + "\",\"freeTierProcessingConsent\":" + freeTierProcessingConsent
+                        + "}", headers), String.class);
         assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         return json(created.getBody()).get("id").asLong();
     }

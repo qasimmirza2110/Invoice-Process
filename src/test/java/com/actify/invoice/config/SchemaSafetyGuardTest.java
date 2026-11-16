@@ -333,14 +333,14 @@ class SchemaSafetyGuardTest {
                 .run(context -> assertRefusedBeforeDataSource(context, "worker", "INVOICE_WORKER_ENABLED"));
     }
 
-    // ---- explicit local-demo Gemini opt-in (INVOICE_LOCALDEMO_GEMINI_ENABLED) ----
+    // ---- explicit local-demo Gemini opt-in (the same INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED as on the server) ----
 
     private static final String FAKE_KEY = "fake-key-value-that-must-never-appear";
 
-    /** A complete, valid opt-in WITHOUT the worker: key, explicit model and whole-number limits. */
-    private static final String[] OPT_IN = {"INVOICE_LOCALDEMO_GEMINI_ENABLED", "true", "GEMINI_API_KEY", FAKE_KEY,
-            "GEMINI_MODEL", "gemini-3.5-flash-lite", "GEMINI_LIMIT_RPM", "15", "GEMINI_LIMIT_TPM", "250000",
-            "GEMINI_LIMIT_RPD", "1000", "GEMINI_INITIAL_TOKEN_ESTIMATE", "3000"};
+    /** A complete, valid opt-in WITHOUT the worker: confirmation, key, the one model and whole-number limits. */
+    private static final String[] OPT_IN = {"INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED", "true",
+            "GEMINI_API_KEY", FAKE_KEY, "GEMINI_MODEL", "gemini-3.5-flash-lite", "GEMINI_LIMIT_RPM", "15",
+            "GEMINI_LIMIT_TPM", "250000", "GEMINI_LIMIT_RPD", "1000", "GEMINI_INITIAL_TOKEN_ESTIMATE", "3000"};
 
     private static void assertStarted(AssertableApplicationContext context) {
         assertThat(context).hasNotFailed();
@@ -373,12 +373,12 @@ class SchemaSafetyGuardTest {
     }
 
     @Test
-    void theGeminiOptInNeedsAnExplicitModelNotTheSilentDefault() throws Exception {
+    void theGeminiOptInNeedsTheOneModelSetExplicitly() throws Exception {
         localDemo().withInitializer(environmentVariables(without(OPT_IN, "GEMINI_MODEL")))
-                .run(context -> assertRefusedBeforeDataSource(context, "no model", "set GEMINI_MODEL explicitly"));
+                .run(context -> assertRefusedBeforeDataSource(context, "no model", "needs GEMINI_MODEL=gemini-3.5-flash-lite"));
         DATA_SOURCE_CREATED.set(false);
         localDemo().withInitializer(environmentVariables(concat(without(OPT_IN, "GEMINI_MODEL"), "GEMINI_MODEL", "Gemini Flash; rm")))
-                .run(context -> assertRefusedBeforeDataSource(context, "odd model", "plain model id"));
+                .run(context -> assertRefusedBeforeDataSource(context, "odd model", "needs GEMINI_MODEL=gemini-3.5-flash-lite"));
         DATA_SOURCE_CREATED.set(false);
         // e.g. -Dgemini.model=... or --gemini.model=... : a source ABOVE the environment variables.
         localDemo().withInitializer(environmentVariables(OPT_IN))
@@ -404,14 +404,6 @@ class SchemaSafetyGuardTest {
     }
 
     @Test
-    void theLocalDemoNeverOffersTheLegacyExtractionThatWouldBypassTheAllowlist() throws Exception {
-        Properties demo = PropertiesLoaderUtils.loadProperties(new ClassPathResource("application-localdemo.properties"));
-        assertThat(demo.getProperty(SchemaSafetyGuard.LEGACY_EXTRACT_PROPERTY)).isEqualTo("false");
-        localDemo().withInitializer(environmentVariables(concat(OPT_IN, "INVOICE_LEGACY_EXTRACT_ENABLED", "true")))
-                .run(context -> assertRefusedBeforeDataSource(context, "legacy on", "legacy single-file extraction must stay"));
-    }
-
-    @Test
     void theGeminiOptInNeverWidensTheDatabaseRules() throws Exception {
         localDemo().withInitializer(environmentVariables(concat(OPT_IN, "SPRING_DATASOURCE_URL", LIVE_URL)))
                 .run(context -> assertRefusedBeforeDataSource(context, "opt-in on live", "may never use"));
@@ -421,19 +413,12 @@ class SchemaSafetyGuardTest {
     }
 
     @Test
-    void aLocalDemoWorkerMustBeLimitedToNamedInvoicesSoTheBacklogIsNeverProcessed() throws Exception {
-        String[] base = concat(OPT_IN, "INVOICE_WORKER_ENABLED", "true");
-        localDemo().withInitializer(environmentVariables(base))
-                .run(context -> assertRefusedBeforeDataSource(context, "worker without ids", "INVOICE_WORKER_ONLY_INVOICE_IDS"));
-        DATA_SOURCE_CREATED.set(false);
-        localDemo().withInitializer(environmentVariables(concat(base, "INVOICE_WORKER_ONLY_INVOICE_IDS", "17, x")))
-                .run(context -> assertRefusedBeforeDataSource(context, "bad ids", "comma-separated list"));
-        DATA_SOURCE_CREATED.set(false);
-        localDemo().withInitializer(environmentVariables(concat(base, "INVOICE_WORKER_ONLY_INVOICE_IDS", "17")))
+    void aLocalDemoWorkerNeedsTheOptInButNoInvoiceIds() throws Exception {
+        localDemo().withInitializer(environmentVariables(concat(OPT_IN, "INVOICE_WORKER_ENABLED", "true")))
                 .run(SchemaSafetyGuardTest::assertStarted);
         DATA_SOURCE_CREATED.set(false);
-        // The worker switch alone (no opt-in) is still refused, exactly as before.
-        localDemo().withInitializer(environmentVariables("INVOICE_WORKER_ENABLED", "true", "INVOICE_WORKER_ONLY_INVOICE_IDS", "17"))
+        // The worker switch alone (no opt-in) is still refused.
+        localDemo().withInitializer(environmentVariables("INVOICE_WORKER_ENABLED", "true"))
                 .run(context -> assertRefusedBeforeDataSource(context, "worker without opt-in", "INVOICE_WORKER_ENABLED"));
     }
 
@@ -480,17 +465,12 @@ class SchemaSafetyGuardTest {
     }
 
     @Test
-    void withTheGeminiOptInAnyOnSpellingStillNeedsTheInvoiceAllowlist() throws Exception {
+    void withTheGeminiOptInAnyOnSpellingStartsTheWorkerWithoutAnAllowlist() throws Exception {
         for (String on : new String[]{"yes", "on", "1"}) {
             DATA_SOURCE_CREATED.set(false);
             localDemo().withInitializer(environmentVariables(concat(OPT_IN, "INVOICE_WORKER_ENABLED", on)))
-                    .run(context -> assertRefusedBeforeDataSource(context, "opt-in, worker '" + on + "'",
-                            "INVOICE_WORKER_ONLY_INVOICE_IDS"));
+                    .run(SchemaSafetyGuardTest::assertStarted);
         }
-        DATA_SOURCE_CREATED.set(false);
-        localDemo().withInitializer(environmentVariables(concat(OPT_IN, "INVOICE_WORKER_ENABLED", "yes",
-                        "INVOICE_WORKER_ONLY_INVOICE_IDS", "17")))
-                .run(SchemaSafetyGuardTest::assertStarted);
     }
 
     private static String[] concat(String[] a, String... b) {

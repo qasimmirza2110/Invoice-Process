@@ -45,15 +45,13 @@ class QuotaSettingsTest {
     }
 
     @Test
-    void workerWithoutConfiguredLimitsIsRefusedButTheLegacyEndpointIsNot() {
+    void withoutConfiguredLimitsNoCallIsAllowed() {
         GeminiQuotaGuard guard = guard(new QuotaSettings("", "", "", "", 0.8), Clock.systemDefaultZone());
 
-        GeminiQuotaGuard.Check worker = guard.check(true);
-        GeminiQuotaGuard.Check legacy = guard.check(false);
+        GeminiQuotaGuard.Check worker = guard.check(null);
 
         assertThat(worker.isAllowed()).isFalse();
         assertThat(worker.getReason()).contains("not configured");
-        assertThat(legacy.isAllowed()).isTrue();
     }
 
     @Test
@@ -95,14 +93,14 @@ class QuotaSettingsTest {
 
         GeminiQuotaGuard justCalled = guard(settings, clock);
         when(attemptsOf(justCalled).lastStartedAt("test-model")).thenReturn(now.minusSeconds(2));
-        GeminiQuotaGuard.Check tooSoon = justCalled.check(true);
+        GeminiQuotaGuard.Check tooSoon = justCalled.check(null);
         assertThat(tooSoon.isAllowed()).isFalse();
         assertThat(tooSoon.getReason()).startsWith("Pacing calls evenly");
         assertThat(tooSoon.getNotBefore()).isEqualTo(now.plusSeconds(3)); // 2 s ago + 5 s gap
 
         GeminiQuotaGuard longAgo = guard(settings, clock);
         when(attemptsOf(longAgo).lastStartedAt("test-model")).thenReturn(now.minusSeconds(6));
-        assertThat(longAgo.check(true).isAllowed()).isTrue();
+        assertThat(longAgo.check(null).isAllowed()).isTrue();
     }
 
     private static GeminiCallAttemptRepository attemptsOf(GeminiQuotaGuard guard) {

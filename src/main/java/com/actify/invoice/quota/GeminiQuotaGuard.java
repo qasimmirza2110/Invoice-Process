@@ -18,33 +18,39 @@ import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
-import java.util.Collections;
 import java.util.List;
-import java.util.Set;
 
 /**
- * ONE shared pacer for every Gemini call of this application (the queue worker and the legacy /extract endpoint).
+ * ONE shared pacer for every Gemini call of this application (the queue worker is the only caller).
  *
- * Before a call, inside the caller's short transaction:
- *   1. take a PostgreSQL advisory lock, so two callers cannot both decide "there is quota left" at the same moment;
- *   2. check() - requests in the last 60 s (RPM), input tokens in the last 60 s (TPM) and requests since the last
- *      midnight Pacific time (RPD, Google's reset time), each against limit x safety margin;
- *   3. recordStart() - insert the attempt row (IN_FLIGHT) and commit. Counting at send time means a crash still counts.
- * After the call: complete() stores the outcome and the token counts Gemini reported.
+ * Before a call, inside the worker's short claim transaction:
+ *   1. take a PostgreSQL advisory lock, so two workers cannot both decide "there is quota left" at the same moment;
+ *   2. check() - requests since the last midnight Pacific time (RPD, Google's reset time), a 60 s cool-down after a
+ *      per-minute 429, requests in the last 60 s (RPM) with even spacing, and input tokens in the last 60 s (TPM)
+ *      PLUS a reservation for the PDF about to be sent - each against limit x safety margin;
+ *   3. recordStart() - insert the attempt row (IN_FLIGHT, with the reservation) and commit. Counting at send time
+ *      means a crash still counts. The rows live in PostgreSQL: a restart never resets the counters.
+ * After the call: complete() stores the outcome and the prompt / output / total token counts Gemini reported, which
+ * then replace the reservation in the TPM sum.
  *
- * Honest limits of this design: it only sees THIS app's calls (Google counts per project), the minute window is a
- * rolling 60 s (Google's exact window is not documented), and tokens are an estimate until Gemini reports them.
- * A 429 from Gemini therefore always wins: it is retried or pauses the worker (FailureClassifier).
+ * Honest limits of this design: it only sees THIS app's calls (Google counts per project, across all keys of that
+ * project), the minute window is a rolling 60 s (Google's exact window is not documented), and tokens are an estimate
+ * until Gemini reports them. A 429 from Gemini therefore always wins: it defers the queue (FailureClassifier,
+ * ExtractionWorker) and never causes a tight retry loop.
  */
 @Service
 public class GeminiQuotaGuard {
 
     private static final Logger log = LoggerFactory.getLogger(GeminiQuotaGuard.class);
 
-    /** Google resets the requests-per-day quota at midnight Pacific time. */
+    /** Google resets the requests-per-day quota at midnight Pacific time (DST handled by the zone rules). */
     public static final ZoneId QUOTA_RESET_ZONE = ZoneId.of("America/Los_Angeles");
     static final long ADVISORY_LOCK_KEY = 80880008L;
     static final int IN_FLIGHT_STALE_MINUTES = 10;
+    /** After a per-minute 429 from Gemini no call starts for this long (one full rate-limit window). */
+    public static final long RATE_LIMIT_COOLDOWN_SECONDS = 60;
+    /** How often a refused claim is re-evaluated while the minute window drains (no Gemini call is made meanwhile). */
+    static final long MINUTE_WINDOW_RECHECK_SECONDS = 5;
     private static final int ESTIMATE_SAMPLE_SIZE = 20;
 
     private final QuotaSettings settings;
@@ -77,6 +83,10 @@ public class GeminiQuotaGuard {
             this.estimatedInputTokens = estimatedInputTokens;
         }
 
+        public static Check refused(String reason, LocalDateTime notBefore, int estimatedInputTokens) {
+            return new Check(false, reason, notBefore, estimatedInputTokens);
+        }
+
         public static Check allowed(int estimatedInputTokens) {
             return new Check(true, null, null, estimatedInputTokens);
         }
@@ -89,31 +99,36 @@ public class GeminiQuotaGuard {
 
     /**
      * Must run inside the caller's transaction: the advisory lock is held until that transaction ends, so
-     * check() and the following recordStart() are one atomic decision.
+     * check() and the following recordStart() are one atomic decision. Without configured limits nothing is allowed.
      *
-     * @param enforceWhenNotConfigured true for the worker (no limits configured = no calls at all);
-     *                                 false for the legacy endpoint, which worked before limits existed and still does
+     * @param documentSizeBytes size of the PDF about to be sent (scales the token reservation), or null when unknown
      */
     @Transactional(propagation = Propagation.MANDATORY)
-    public Check check(boolean enforceWhenNotConfigured) {
+    public Check check(Long documentSizeBytes) {
         lock();
         LocalDateTime now = LocalDateTime.now(clock);
-        int estimate = estimateInputTokens();
+        int estimate = estimateInputTokens(documentSizeBytes);
         if (!settings.isConfigured()) {
-            return enforceWhenNotConfigured
-                    ? new Check(false, "Gemini limits are not configured: " + settings.getProblem(), null, estimate)
-                    : new Check(true, null, null, estimate);
+            return new Check(false, "Gemini limits are not configured: " + settings.getProblem(), null, estimate);
         }
 
         LocalDateTime pausedUntil = dailyPauseUntil(now);
         if (pausedUntil != null) {
-            return new Check(false, "Daily Gemini quota reached; paused until the reset (midnight Pacific time).",
+            return new Check(false, "Daily Gemini quota (RPD) reached; paused until the reset (midnight Pacific time).",
                     pausedUntil, estimate);
+        }
+        // Google said "too many requests" (a per-minute 429): nobody calls again for a full minute, so the next queued
+        // invoice does not run straight into the same 429 (Google's limit counts the whole project, not only this app).
+        LocalDateTime cooldownUntil = rateLimitCooldownUntil(now);
+        if (cooldownUntil != null) {
+            return new Check(false, "Gemini answered 429 (rate limit); cooling down until " + cooldownUntil + ".",
+                    cooldownUntil, estimate);
         }
         LocalDateTime minuteAgo = now.minusSeconds(60);
         long requestsLastMinute = attempts.countStartedSince(model(), minuteAgo);
         if (requestsLastMinute >= settings.budget(settings.getRpm())) {
-            return new Check(false, "Requests-per-minute budget used; waiting.", now.plusSeconds(5), estimate);
+            return new Check(false, "Requests-per-minute (RPM) budget used; waiting.",
+                    now.plusSeconds(MINUTE_WINDOW_RECHECK_SECONDS), estimate);
         }
         // Even pacing: never start two calls closer together than 60 s / budget (e.g. 5 s for 12 calls a minute).
         LocalDateTime lastStart = settings.minIntervalMillis() > 0 ? attempts.lastStartedAt(model()) : null;
@@ -126,7 +141,8 @@ public class GeminiQuotaGuard {
         long tokensLastMinute = attempts.sumInputTokensSince(model(), minuteAgo);
         // A single invoice bigger than the whole minute budget must still be allowed once the minute is empty.
         if (tokensLastMinute > 0 && tokensLastMinute + estimate > settings.budget(settings.getTpm())) {
-            return new Check(false, "Input-tokens-per-minute budget used; waiting.", now.plusSeconds(5), estimate);
+            return new Check(false, "Input-tokens-per-minute (TPM) budget used (this PDF needs about " + estimate
+                    + " tokens); waiting.", now.plusSeconds(MINUTE_WINDOW_RECHECK_SECONDS), estimate);
         }
         return new Check(true, null, null, estimate);
     }
@@ -153,20 +169,9 @@ public class GeminiQuotaGuard {
     /** Calls that never reported back (process died) become UNKNOWN; they keep counting against the quota. */
     @Transactional
     public int recoverInFlight() {
-        return recoverInFlight(Collections.<Long>emptySet());
-    }
-
-    /**
-     * Same, but with a worker allowlist (invoice.worker.only-invoice-ids) only the attempts of those invoices are
-     * touched: a controlled test changes no row of any other invoice. Empty = all invoices (normal operation).
-     */
-    @Transactional
-    public int recoverInFlight(Set<Long> onlyInvoiceIds) {
         LocalDateTime now = LocalDateTime.now(clock);
         LocalDateTime cutoff = now.minusMinutes(IN_FLIGHT_STALE_MINUTES);
-        List<GeminiCallAttempt> stale = onlyInvoiceIds.isEmpty()
-                ? attempts.findByOutcomeStartedBefore(GeminiCallAttempt.Outcome.IN_FLIGHT, cutoff)
-                : attempts.findByOutcomeStartedBeforeAmong(GeminiCallAttempt.Outcome.IN_FLIGHT, cutoff, onlyInvoiceIds);
+        List<GeminiCallAttempt> stale = attempts.findByOutcomeStartedBefore(GeminiCallAttempt.Outcome.IN_FLIGHT, cutoff);
         for (GeminiCallAttempt attempt : stale) {
             attempt.markUnknown(now);
         }
@@ -174,12 +179,6 @@ public class GeminiQuotaGuard {
             log.warn("{} Gemini call(s) never reported back; marked UNKNOWN", stale.size());
         }
         return stale.size();
-    }
-
-    /** True when any Gemini call was ever recorded for this invoice (the free-tier test sends each invoice once). */
-    @Transactional(readOnly = true)
-    public boolean hasAnyAttempt(Long invoiceId) {
-        return attempts.maxAttemptNumber(invoiceId) > 0;
     }
 
     /** Next midnight Pacific time, as a local (server time zone) date-time - the format every column uses. */
@@ -195,16 +194,31 @@ public class GeminiQuotaGuard {
         return LocalDateTime.ofInstant(nowPacific.toLocalDate().atStartOfDay(QUOTA_RESET_ZONE).toInstant(), clock.getZone());
     }
 
-    /** For the admin dashboard (read-only, no lock). */
+    /** For the admin dashboard (read-only, no lock). Counts only - never invoice content or a secret. */
     @Transactional(readOnly = true)
     public QuotaStatus status() {
         LocalDateTime now = LocalDateTime.now(clock);
         LocalDateTime minuteAgo = now.minusSeconds(60);
-        return new QuotaStatus(settings.isConfigured(), settings.getProblem(), geminiConfig.getModel(),
+        LocalDateTime since = lastDailyReset();
+        boolean configured = settings.isConfigured();
+        long requestsLastMinute = attempts.countStartedSince(model(), minuteAgo);
+        long tokensLastMinute = attempts.sumInputTokensSince(model(), minuteAgo);
+        long requestsToday = attempts.countStartedSince(model(), since);
+        int estimate = estimateInputTokens(null);
+        LocalDateTime pausedUntil = configured ? dailyPauseUntil(now) : null;
+        QuotaStatus status = new QuotaStatus(configured, settings.getProblem(), geminiConfig.getModel(),
                 settings.getRpm(), settings.getTpm(), settings.getRpd(), settings.getSafetyMargin(),
-                attempts.countStartedSince(model(), minuteAgo), attempts.sumInputTokensSince(model(), minuteAgo),
-                attempts.countStartedSince(model(), lastDailyReset()), settings.isConfigured() ? dailyPauseUntil(now) : null,
-                nextDailyReset(), estimateInputTokens());
+                requestsLastMinute, tokensLastMinute, requestsToday, pausedUntil, nextDailyReset(), estimate);
+        status.setUsageSinceDailyReset(attempts.sumInputTokensSince(model(), since),
+                attempts.sumOutputTokensSince(model(), since), attempts.sumTotalTokensSince(model(), since));
+        if (configured) {
+            status.setExhaustion(requestsLastMinute >= settings.budget(settings.getRpm()),
+                    tokensLastMinute > 0 && tokensLastMinute + estimate > settings.budget(settings.getTpm()),
+                    pausedUntil != null, rateLimitCooldownUntil(now),
+                    settings.budget(settings.getRpm()), settings.budget(settings.getTpm()),
+                    settings.budget(settings.getRpd()));
+        }
+        return status;
     }
 
     private LocalDateTime dailyPauseUntil(LocalDateTime now) {
@@ -214,22 +228,41 @@ public class GeminiQuotaGuard {
         return googleSaidDailyLimit || localBudgetUsed ? nextDailyReset() : null;
     }
 
+    private LocalDateTime rateLimitCooldownUntil(LocalDateTime now) {
+        LocalDateTime last429 = attempts.lastFinishedWithStatus(model(), 429, GeminiCallAttempt.Outcome.RETRYABLE_ERROR);
+        if (last429 == null) {
+            return null;
+        }
+        LocalDateTime resume = last429.plusSeconds(RATE_LIMIT_COOLDOWN_SECONDS);
+        return now.isBefore(resume) ? resume : null;
+    }
+
     /**
-     * Average of the last 20 input-token counts Gemini reported; before any history exists, the configured
-     * initial estimate. (No PDF page counting: that would need a new PDF library.)
+     * The input-token reservation for the next call. Gemini's reported promptTokenCount covers the PDF AND the extraction
+     * prompt, so the history already includes both. Before any history exists: the configured initial estimate
+     * (GEMINI_INITIAL_TOKEN_ESTIMATE). With history: the average of the last 20 reported counts, raised - never lowered -
+     * to the tokens-per-byte rate of those calls times this PDF's size, so a larger PDF reserves more than a small one.
      */
-    int estimateInputTokens() {
-        List<Long> recent = attempts.recentPromptTokenCounts(model(), GeminiCallAttempt.Outcome.SUCCESS,
+    int estimateInputTokens(Long documentSizeBytes) {
+        List<Object[]> recent = attempts.recentPromptTokensWithDocumentSize(model(), GeminiCallAttempt.Outcome.SUCCESS,
                 PageRequest.of(0, ESTIMATE_SAMPLE_SIZE));
         if (recent.isEmpty()) {
             Integer initial = settings.getInitialTokenEstimate();
             return initial == null ? 0 : initial;
         }
-        long sum = 0;
-        for (Long count : recent) {
-            sum += count;
+        long tokens = 0;
+        long bytes = 0;
+        for (Object[] row : recent) {
+            tokens += ((Number) row[0]).longValue();
+            bytes += row[1] == null ? 0 : ((Number) row[1]).longValue();
         }
-        return (int) Math.min(Integer.MAX_VALUE, sum / recent.size());
+        long average = tokens / recent.size();
+        long estimate = average;
+        if (documentSizeBytes != null && documentSizeBytes > 0 && bytes > 0) {
+            long scaled = (long) Math.ceil((double) tokens * documentSizeBytes / bytes);
+            estimate = Math.max(average, scaled);
+        }
+        return (int) Math.min(Integer.MAX_VALUE, estimate);
     }
 
     private String model() {

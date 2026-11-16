@@ -113,9 +113,18 @@ public class BatchIntakeService {
         return createBatch(label, defaultCategoryCode, null);
     }
 
-    /** @param source LOCAL (default), GOOGLE_DRIVE or ONEDRIVE; one source per batch, cloud ones only when configured. */
     @Transactional
     public BatchSummary createBatch(String label, String defaultCategoryCode, String source) {
+        return createBatch(label, defaultCategoryCode, source, false);
+    }
+
+    /**
+     * @param source          LOCAL (default), GOOGLE_DRIVE or ONEDRIVE; one source per batch, cloud ones only when
+     *                        configured.
+     * @param freeTierConsent the uploader's explicit free-tier statement (UploadBatch); fixed for the batch's lifetime
+     */
+    @Transactional
+    public BatchSummary createBatch(String label, String defaultCategoryCode, String source, boolean freeTierConsent) {
         AuthenticatedUser user = currentUser.require();
         BatchSource batchSource = parseSource(source);
         if (batchSource == null) {
@@ -132,8 +141,9 @@ public class BatchIntakeService {
         }
         String category = categoryCodes.requireActiveOrNull(defaultCategoryCode);
         AppUser owner = entityManager.find(AppUser.class, user.getId());
-        UploadBatch batch = batchRepository.save(new UploadBatch(owner, batchSource, cleanLabel, category));
-        log.info("Batch {} ({}) created by user {}", batch.getId(), batchSource, user.getId());
+        UploadBatch batch = batchRepository.save(new UploadBatch(owner, batchSource, cleanLabel, category, freeTierConsent));
+        log.info("Batch {} ({}) created by user {} (freeTierConsent={})", batch.getId(), batchSource, user.getId(),
+                freeTierConsent);
         return new BatchSummary(batch);
     }
 

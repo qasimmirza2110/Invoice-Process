@@ -55,4 +55,48 @@ public class QuotaStatus {
     public LocalDateTime getPausedUntil() { return pausedUntil; }
     public LocalDateTime getNextDailyReset() { return nextDailyReset; }
     public int getEstimatedInputTokensPerCall() { return estimatedInputTokensPerCall; }
+
+    // ---- Added for the free-tier monitor (backward compatible: new JSON fields only) ----
+
+    private long inputTokensSinceDailyReset;
+    private long outputTokensSinceDailyReset;
+    private long totalTokensSinceDailyReset;
+    private boolean minuteRequestBudgetExhausted;
+    private boolean minuteTokenBudgetExhausted;
+    private boolean dailyBudgetExhausted;
+    private LocalDateTime rateLimitCooldownUntil;
+    private Integer rpmBudget;
+    private Integer tpmBudget;
+    private Integer rpdBudget;
+
+    /** Gemini-reported token usage (input where unreported = the reservation) since the last midnight Pacific time. */
+    public void setUsageSinceDailyReset(long input, long output, long total) {
+        this.inputTokensSinceDailyReset = input;
+        this.outputTokensSinceDailyReset = output;
+        this.totalTokensSinceDailyReset = total;
+    }
+
+    /** Which budget currently stops new calls; the budgets are limit x safety margin (what the worker really uses). */
+    public void setExhaustion(boolean minuteRequests, boolean minuteTokens, boolean daily, LocalDateTime cooldownUntil,
+                              int rpmBudget, int tpmBudget, int rpdBudget) {
+        this.minuteRequestBudgetExhausted = minuteRequests;
+        this.minuteTokenBudgetExhausted = minuteTokens;
+        this.dailyBudgetExhausted = daily;
+        this.rateLimitCooldownUntil = cooldownUntil;
+        this.rpmBudget = rpmBudget;
+        this.tpmBudget = tpmBudget;
+        this.rpdBudget = rpdBudget;
+    }
+
+    public long getInputTokensSinceDailyReset() { return inputTokensSinceDailyReset; }
+    public long getOutputTokensSinceDailyReset() { return outputTokensSinceDailyReset; }
+    public long getTotalTokensSinceDailyReset() { return totalTokensSinceDailyReset; }
+    public boolean isMinuteRequestBudgetExhausted() { return minuteRequestBudgetExhausted; }
+    public boolean isMinuteTokenBudgetExhausted() { return minuteTokenBudgetExhausted; }
+    public boolean isDailyBudgetExhausted() { return dailyBudgetExhausted; }
+    /** Set while a per-minute 429 from Gemini keeps every call on hold, else null. */
+    public LocalDateTime getRateLimitCooldownUntil() { return rateLimitCooldownUntil; }
+    public Integer getRpmBudget() { return rpmBudget; }
+    public Integer getTpmBudget() { return tpmBudget; }
+    public Integer getRpdBudget() { return rpdBudget; }
 }

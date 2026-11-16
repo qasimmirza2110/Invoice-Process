@@ -118,6 +118,24 @@ public class ExtractionOutcomeService {
         workflow.transition(invoice, InvoiceStatus.QUEUED, null, null, errorCode + ": daily quota, waiting until " + resetAt);
     }
 
+    /**
+     * Gemini's per-minute rate limit (429) in the free-tier auto queue: back to the queue until nextAttemptAt without
+     * spending an attempt, so a busy free-tier minute can never turn an invoice into FAILED. Bounded by the local
+     * daily budget: every refused call still counts as a request, and the daily pause stops further calls.
+     */
+    @Transactional
+    public void deferForRateLimit(Long invoiceId, String errorCode, LocalDateTime nextAttemptAt, TokenUsage usage,
+                                  long durationMs) {
+        Invoice invoice = lockProcessing(invoiceId);
+        if (invoice == null) {
+            return;
+        }
+        applyTokenUsage(invoice, usage, durationMs);
+        jobRepository.findById(invoiceId).orElseThrow(IllegalStateException::new)
+                .deferWithoutUsingAttempt(nextAttemptAt, errorCode, "Gemini rate limit reached; waiting in the queue.");
+        workflow.transition(invoice, InvoiceStatus.QUEUED, null, null, errorCode + ": rate limit, waiting until " + nextAttemptAt);
+    }
+
     @Transactional
     public void markFailed(Long invoiceId, String errorCode, String safeMessage, TokenUsage usage, long durationMs) {
         Invoice invoice = lockProcessing(invoiceId);

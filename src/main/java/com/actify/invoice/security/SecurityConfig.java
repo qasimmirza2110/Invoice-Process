@@ -108,8 +108,6 @@ public class SecurityConfig {
                 // Which cloud pickers exist (public browser values only, never a secret or token).
                 .antMatchers(HttpMethod.GET, "/api/cloud-sources").hasAnyRole("VENDOR", "ADMIN")
 
-                // Legacy single-file extraction: ADMIN only.
-                .antMatchers(HttpMethod.POST, "/api/invoices/extract").hasRole("ADMIN")
                 // Review workflow: the reviewer submits, the admin decides.
                 .antMatchers(HttpMethod.POST, "/api/invoices/*/submit").hasRole("REVIEWER")
                 .antMatchers(HttpMethod.POST, "/api/invoices/*/approve", "/api/invoices/*/reject",

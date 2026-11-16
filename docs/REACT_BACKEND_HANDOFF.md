@@ -218,7 +218,7 @@ Every 4xx/5xx from the API (from controllers **and** from the security filters) 
 | 415 | Wrong `Content-Type` | developer error | fix the request |
 | 422 | Rule rejected the content | batch file rejected (`FileIntakeResponse.code`), submit while current data fails a check or duplicates an earlier invoice of the same vendor, legacy extraction result failed validation | show `code`/`message`/`fieldErrors`; do not retry unchanged |
 | 429 | Temporarily refused | login locked (5 failures → 15 min); Gemini quota (legacy extract only) | show message; retry later |
-| 502 | Provider failure | Gemini call failed (legacy `POST /api/invoices/extract` only) | show message; retry later |
+| 502 | Provider failure | not used by any current endpoint (extraction runs in the background worker) | show message |
 | 500 | Server or storage error | database unavailable (e.g. free quota used up), a stored PDF failing its SHA-256 check, or the PDF bucket unreachable during an upload (`message`: "Could not store the original PDF" — the file was **not** accepted, nothing was queued) | "something went wrong (reference …)"; an upload may be retried later — a duplicate is never created |
 
 Duplicate invoices: a re-uploaded **identical file** of the same vendor is refused at intake (422 `DUPLICATE_FILE`); the
@@ -261,7 +261,7 @@ lock; resets on restart); logout-all writes `app_users.token_version`.
 
 | # | Method & path | Handler | Scope | Writes | Request | Success | Errors | Tests |
 |---|---|---|---|---|---|---|---|---|
-| 6 | `POST /api/batches` | `BatchController.create` | creator owns it | yes | `CreateBatchRequest {label?, defaultCategoryCode?, source?}` — `source` ∈ `LOCAL` (default) / `GOOGLE_DRIVE` / `ONEDRIVE`; label ≤ 255 | 201 `BatchSummary` | 400 unknown source / cloud source not configured / unknown category | `BatchQueuePgIntegrationTest`, `BatchRouteProtectionWebTest` |
+| 6 | `POST /api/batches` | `BatchController.create` | creator owns it | yes | `CreateBatchRequest {label?, defaultCategoryCode?, source?, freeTierProcessingConsent?}` — `source` ∈ `LOCAL` (default) / `GOOGLE_DRIVE` / `ONEDRIVE`; label ≤ 255; `freeTierProcessingConsent` default `false`, fixed for the batch (section 11b) | 201 `BatchSummary` | 400 unknown source / cloud source not configured / unknown category | `BatchQueuePgIntegrationTest`, `BatchRouteProtectionWebTest` |
 | 7 | `GET /api/batches` | `BatchController.list` | vendor: own; admin: all | – | – | 200 `BatchSummary[]` newest first | – | same |
 | 8 | `GET /api/batches/{id}` | `BatchController.get` | owner or admin | – | – | 200 `BatchDetail` | 404 | same |
 | 9 | `POST /api/batches/{id}/files` | `BatchController.addFile` | owner or admin | yes | multipart: `file` (one PDF, required), `relativePath?` (folder uploads), `source?` | **202** accepted / **422** rejected — both `FileIntakeResponse` | 400 no file / > 10 MB, 404, 409 batch closed or 100 files reached | `BatchQueuePgIntegrationTest`, `IntakeAssignmentPgIntegrationTest`, `BatchRouteProtectionWebTest` |
@@ -363,8 +363,8 @@ saved in between — reload). Versions are immutable; history is never rewritten
 | 40 | `POST /api/invoices/{id}/send-back` | `ApprovalController.sendBack` | yes | `{"reason":"required"}` | 200 (`NEEDS_REVIEW`) | only from `PENDING_APPROVAL` (409) | same |
 | 41 | `POST /api/invoices/{id}/reopen` | `ApprovalController.reopen` | yes | `{"reason":"required"}` | 200 (`NEEDS_REVIEW`) | only from `APPROVED`/`REJECTED` | same |
 | 42 | `POST /api/invoices/{id}/requeue` | `ApprovalController.requeue` | yes | `{"reason":"required"}` | 200 (`QUEUED`) | only a `FAILED` batch invoice | same |
-| 43 | `GET /api/admin/queue/status` | `AdminQueueController.status` | – | – | 200 `{workerEnabled, workerRunning, geminiMode, geminiKeyConfigured, onlyInvoiceIds, idleReason, quota}` | `geminiKeyConfigured` = presence only | `DailyQuotaPgIntegrationTest` |
-| 44 | `POST /api/invoices/extract` | `InvoiceController.extract` | yes | multipart `file` | 201 `Invoice` — **legacy** single-file extraction, calls Gemini synchronously | 400 file rules, 409 switched off (`invoice.legacy-extract.enabled=false`: local demo and default in `render`), 422 validation, 429 quota, 502 provider | `InvoiceControllerTest`, `LegacyExtractSwitchTest`, `InvoiceRouteProtectionWebTest` |
+| 43 | `GET /api/admin/queue/status` | `AdminQueueController.status` | – | – | 200 `{workerEnabled, workerRunning, geminiMode, geminiKeyConfigured, idleReason, quota, workerState, eligibleQueuedInvoices, deferredQueuedInvoices, resumeAt, queuedWithoutFreeTierConsent, lastExtractionError}` | `geminiKeyConfigured` = presence only | `DailyQuotaPgIntegrationTest` |
+| 44 | ~~`POST /api/invoices/extract`~~ | **removed** | – | – | – | refused (401 anonymous / 403 any role). PDFs enter only through batch uploads; only the queue worker calls Gemini | `InvoiceControllerTest`, `InvoiceRouteProtectionWebTest` |
 
 Every decision writes an append-only `invoice_workflow_events` row (who, when, from/to status, version, reason).
 
@@ -428,12 +428,67 @@ counts as `value ?? 0`. Rates are fractions 0–1 (multiply by 100 to display) o
 // QuotaStatus (queue.quota above, and "quota" in GET /api/admin/queue/status)
 { "configured": false, "configurationProblem": "...", "model": "...", "rpmLimit": null, "tpmLimit": null, "rpdLimit": null,
   "safetyMargin": 0.8, "requestsLastMinute": 0, "inputTokensLastMinute": 0, "requestsSinceDailyReset": 0,
-  "pausedUntil": null, "nextDailyReset": "2026-10-29T12:30:00", "estimatedInputTokensPerCall": 0 }
+  "pausedUntil": null, "nextDailyReset": "2026-10-29T12:30:00", "estimatedInputTokensPerCall": 0,
+  // added (free-tier monitor): today's Gemini-reported tokens, which budget stops new calls, the budgets in use
+  "inputTokensSinceDailyReset": 0, "outputTokensSinceDailyReset": 0, "totalTokensSinceDailyReset": 0,
+  "minuteRequestBudgetExhausted": false, "minuteTokenBudgetExhausted": false, "dailyBudgetExhausted": false,
+  "rateLimitCooldownUntil": null, "rpmBudget": null, "tpmBudget": null, "rpdBudget": null }
 // GET /api/admin/queue/status
 { "workerEnabled": false, "workerRunning": false, "geminiMode": "NOT_CONFIRMED", "geminiKeyConfigured": false,
-  "onlyInvoiceIds": [],
-  "idleReason": "...", "quota": { /* QuotaStatus */ } }
+  "idleReason": "...", "quota": { /* QuotaStatus */ },
+  "workerState": "DISABLED", "eligibleQueuedInvoices": 0, "deferredQueuedInvoices": 0, "resumeAt": null,
+  "queuedWithoutFreeTierConsent": 0, "lastExtractionError": null }
+// geminiMode: NOT_CONFIRMED | FREE_TIER_AUTO_QUEUE   (there is no paid mode)
+// workerState (show it next to idleReason): DISABLED | GEMINI_KEY_MISSING | MODE_NOT_CONFIRMED | LIMITS_NOT_CONFIGURED |
+//   DAILY_QUOTA_PAUSED | WORKER_ERROR | WAITING_FOR_QUOTA | IDLE_NO_ELIGIBLE_INVOICE | PROCESSING_AVAILABLE
+// resumeAt: end of a known quota wait (daily pause, 429 cool-down or pacing), else null. Treat unknown values as "other".
+// eligibleQueuedInvoices / deferredQueuedInvoices: consented QUEUED invoices that can start now / that wait for a later time.
+// queuedWithoutFreeTierConsent: QUEUED invoices that are never sent (no free-tier consent).
+// lastExtractionError: error code + invoice id + time of the last failed extraction (e.g. "HTTP_429 (invoice 17) at ..."), or null.
+// REMOVED: "onlyInvoiceIds" (there is no invoice-id allowlist any more). Ignore it if an older server still sends it.
 ```
+
+React never triggers extraction and never needs an invoice id from configuration: the backend generates the id and
+returns it. Keep the `invoiceId` that `POST /api/batches/{id}/files` returns, show `QUEUED`, then poll
+`GET /api/batches/{id}` (or `GET /api/invoices/{id}`) every few seconds until the status leaves `QUEUED`/`PROCESSING`.
+On the free tier a long queue is normal (calls are paced by RPM/TPM/RPD; a daily pause lasts until midnight Pacific
+time, and the Render Free service may sleep in between): show "waiting in the extraction queue", not an error. A
+`FAILED` invoice has `failureReason`; only an ADMIN can requeue it.
+
+### 11b. Free-tier consent on a new batch
+
+The backend uses **one** LLM: Google Gemini (`gemini-3.5-flash-lite`) on the **free tier**. **Only** invoices of a
+batch created with `"freeTierProcessingConsent": true` are ever sent to Gemini; all others stay `QUEUED` (the admin
+intake row says why). The backend enforces this - the checkbox alone protects nothing. React:
+
+- On "New batch" show an **unchecked** checkbox, never pre-ticked, with this text (or the owner's approved wording):
+  *"I confirm that these files are synthetic, sanitized or otherwise permitted non-confidential documents, contain no
+  personal, sensitive or confidential information, and may be processed by Google's free Gemini service, which may use
+  them to improve its products and may have them read by humans."*
+- Do **not** tell users that ticking it makes sensitive documents safe to upload. It is the uploader's statement; the
+  backend does not inspect the PDF.
+- Send `freeTierProcessingConsent: true` only when the user ticked it; omit it (or `false`) otherwise.
+- The choice is fixed for the batch: there is no endpoint to change it. Show `freeTierProcessingConsent` /
+  `freeTierProcessingConsentAt` from `BatchSummary` on the batch page.
+- Never decide eligibility in React, and never call Gemini from the browser.
+
+### 11c. Bulk upload (several PDFs at once)
+
+The upload endpoint takes **one PDF per request** (multipart field `file`). For a multi-file picker
+(`<input type="file" accept="application/pdf" multiple>`):
+
+1. `POST /api/batches` `{ "label": "...", "freeTierProcessingConsent": <checkbox> }` → keep `id`.
+2. For **each** selected file, one request: `POST /api/batches/{id}/files` with `FormData` field `file` (optionally
+   `relativePath`). Send them one after another (or a small number at a time). Keep each response:
+   `202` → the generated `invoiceId` (status `QUEUED`); `4xx` → that file's error (not a PDF, too large, duplicate,
+   batch full, ...). One rejected file does not stop the others.
+3. `POST /api/batches/{id}/close`.
+4. Show a result row per file (accepted with its `invoiceId`, or rejected with the message), then poll
+   `GET /api/batches/{id}` for the statuses.
+
+Never invent a multi-file endpoint and never send several files in one multipart request: the controller reads one
+`file` part. The existing limits (files per batch, size per PDF, duplicate detection, PDF validation, ownership) are
+checked by the backend for every file.
 
 With extraction switched off (the default), nothing leaves `QUEUED`: the review, approval and quality numbers stay 0 or
 `null`. That is correct data, not an error.
@@ -452,7 +507,8 @@ With extraction switched off (the default), nothing leaves `QUEUED`: the review,
 
 // BatchSummary
 { "id": 12, "label": "October", "source": "LOCAL", "status": "OPEN", "defaultCategoryCode": "IT", "ownerUserId": 3,
-  "acceptedCount": 2, "rejectedCount": 1, "createdAt": "2026-10-23T10:00:00", "closedAt": null }
+  "acceptedCount": 2, "rejectedCount": 1, "createdAt": "2026-10-23T10:00:00", "closedAt": null,
+  "freeTierProcessingConsent": false, "freeTierProcessingConsentAt": null }
 // BatchDetail
 { "batch": { /* BatchSummary */ }, "statusCounts": { "QUEUED": 2 },
   "invoices": [ { "id": 41, "fileName": "inv-001.pdf", "status": "QUEUED", "queuePosition": 1, "failureReason": null,
@@ -518,7 +574,7 @@ Names of deleted accounts are returned as `"Unknown user"`, never as a raw id.
 
 Editable: `NEEDS_REVIEW` only (plus legacy `EXTRACTED`, admin). Intake-board `stage`: `WAITING_FOR_EXTRACTION`
 (QUEUED), `EXTRACTING` (PROCESSING), `READY_FOR_REVIEW` (NEEDS_REVIEW). `idleReason`/`blockedReason` explain why
-nothing moves (worker off, no key, limits missing, daily/minute pacing, scheduled retry, controlled-test allowlist) —
+nothing moves (worker off, no key, not confirmed, limits missing, daily/minute pacing, 429 cool-down, scheduled retry, missing free-tier consent) —
 none of these is a failure.
 
 ## 6. Original PDF display
@@ -598,10 +654,7 @@ server's answer.
 - No server-sent events / websockets: status changes are discovered by polling.
 - `PUT /api/admin/categories/{code}/active` has no HTTP-level test yet.
 - Cross-origin hosting needs the backend owner to set `INVOICE_CORS_ALLOWED_ORIGINS` (section 1.2).
-- Extraction runs only where the owner has enabled the worker **and** confirmed a paid Gemini project
-  (`INVOICE_GEMINI_PAID_TIER_CONFIRMED=true`), or for a free-tier test of one allowlisted, authorized, non-confidential invoice
-  (`geminiMode=FREE_TIER_TEST`, see `docs/RENDER_DEPLOYMENT.md` 4.2). Otherwise uploads stay `QUEUED` and `GET /api/admin/queue/status`
-  explains why in `idleReason` — that is not a bug.
+- Extraction runs only where the owner has enabled the worker **and** set the free-tier confirmation  (`geminiMode=FREE_TIER_AUTO_QUEUE`, `docs/RENDER_DEPLOYMENT.md` section 4), and only for invoices of batches created with  `freeTierProcessingConsent: true` (11b) - paced by the free-tier quota, so a queue can take days, and not while the  Render Free service sleeps. Otherwise uploads stay `QUEUED` and `GET /api/admin/queue/status` explains why in  `idleReason` / `workerState` — that is not a bug. There is no paid mode.
 - The Bearer flow is tested in the repository (MockMvc + PostgreSQL integration tests), **not yet against a deployed
   service** (see the note at the top).
 - Cloud pickers: frontend work, not live-tested.
@@ -732,7 +785,7 @@ Available but not on a reference card: `statusCounts.PROCESSING`, `statusCounts.
 | …of which waiting for extraction | `counts.needsAssignmentWaitingForExtraction` |
 | Assigned, waiting for extraction | `counts.assignedWaitingForExtraction` |
 | Assigned, ready for review | `counts.assignedReadyForReview` |
-| "Needs a reviewer" / "Assigned" tables | `needsAssignment[]` / `assigned[]`: `invoiceId`, `fileName`, `batchId`, `vendorName`, `categoryCode`, `status`, `stage` (`WAITING_FOR_EXTRACTION` / `EXTRACTING` / `READY_FOR_REVIEW`), `uploadedAt`, `assignedReviewerId`, `assignedReviewerName`, `extractionAttempts`, `blockedReason` |
+| "Needs a reviewer" / "Assigned" tables | `needsAssignment[]` / `assigned[]`: `invoiceId`, `fileName`, `batchId`, `vendorName`, `categoryCode`, `status`, `stage` (`WAITING_FOR_EXTRACTION` / `EXTRACTING` / `READY_FOR_REVIEW`), `extractionState` (`WAITING_FOR_EXTRACTION` / `WAITING_FOR_QUOTA` / `MISSING_FREE_TIER_CONSENT` / `EXTRACTING` / `READY_FOR_REVIEWER_ASSIGNMENT` / `READY_FOR_REVIEW`), `freeTierProcessingConsent`, `uploadedAt`, `assignedReviewerId`, `assignedReviewerName`, `extractionAttempts`, `nextAttemptAt`, `blockedReason`. `counts` adds `missingFreeTierConsent`, `waitingForQuota`, `extracting`, `extractionFailed` (FAILED invoices keep their own section); `worker` adds `resumeAt` and no longer has `onlyInvoiceIds` / `onlyInvoiceIdsProblems` |
 | Worker note above the tables | `worker.enabled`, `worker.running`, `worker.idleReason` |
 
 Lists that are not dashboard cards (approvals, failed, decided, reviewer queue) come from `GET /api/invoices?status=…`

@@ -163,7 +163,7 @@ class IntakeAssignmentPgIntegrationTest extends AbstractQueuePgTest {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         ResponseEntity<String> r = restTemplate.exchange("/api/batches", HttpMethod.POST, new HttpEntity<>(
-                "{\"label\":\"" + label + "\",\"defaultCategoryCode\":\"" + category + "\"}", headers), String.class);
+                "{\"label\":\"" + label + "\",\"defaultCategoryCode\":\"" + category + "\",\"freeTierProcessingConsent\":true}", headers), String.class);
         assertThat(r.getStatusCode()).isEqualTo(HttpStatus.CREATED);
         return json(r.getBody()).get("id").asLong();
     }

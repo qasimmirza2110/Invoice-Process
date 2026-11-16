@@ -4,6 +4,7 @@ import com.actify.invoice.quota.QuotaSettings;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.context.EnvironmentAware;
@@ -45,10 +46,10 @@ import java.util.Locale;
  *  3. Even with that approval, no setting may let Hibernate or Spring change the schema: ddl-auto must be
  *     validate/none, and the other schema-generation / SQL-init switches (also as bare -D system properties)
  *     must be off.
- *  4. Gemini data-policy modes (every non-demo start, see checkGeminiModes): invoice.gemini.require-paid-tier stays
- *     true, the paid and free-tier confirmations exclude each other, and the free-tier test is accepted only fully
- *     restricted (one invoice id, official endpoint, fixed model, limits within the reported ceilings, no legacy
- *     extraction).
+ *  4. Gemini free-tier queue (every start, see checkFreeTierQueue): with INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED=true
+ *     the start needs a key, the official endpoint only, GEMINI_MODEL=gemini-3.5-flash-lite, usable GEMINI_LIMIT_*
+ *     values, a safety margin of at most 0.8 and even pacing. There is no paid mode and no invoice-id allowlist; left-over
+ *     variables of the removed modes are reported as a warning (obsoleteSettings) and have no effect.
  *
  * Not proven by a database: proven by SchemaSafetyGuardTest, which shows that a refused start never even
  * calls the DataSource factory method.
@@ -66,24 +67,22 @@ public class SchemaSafetyGuard implements BeanFactoryPostProcessor, EnvironmentA
     static final String LOCAL_DEMO_ENDPOINT = "localhost:5432/" + LOCAL_DEMO_DATABASE;
     public static final String APPROVAL_PROPERTY = "invoice.live-start-approved";
     public static final String APPROVED_DATABASE_PROPERTY = "invoice.approved-database";
-    /** Explicit local-demo opt-in for real Gemini calls (INVOICE_LOCALDEMO_GEMINI_ENABLED). */
-    public static final String LOCAL_DEMO_GEMINI_PROPERTY = "invoice.localdemo.gemini-enabled";
-    public static final String WORKER_ONLY_INVOICE_IDS_PROPERTY = "invoice.worker.only-invoice-ids";
     static final String OFFICIAL_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
-    /** POST /api/invoices/extract (legacy single-file extraction). Disabled in the local demo. */
-    public static final String LEGACY_EXTRACT_PROPERTY = "invoice.legacy-extract.enabled";
-    public static final String REQUIRE_PAID_TIER_PROPERTY = "invoice.gemini.require-paid-tier";
-    public static final String PAID_TIER_CONFIRMED_PROPERTY = "invoice.gemini.paid-tier-confirmed";
-    /** INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED: one allowlisted test invoice through a free-tier key (checkFreeTierTest). */
-    public static final String FREE_TIER_TEST_PROPERTY = "invoice.gemini.free-tier-test-confirmed";
-    /** The model whose free-tier limits the owner reported from Google AI Studio (2026-10-28). */
-    public static final String FREE_TIER_TEST_MODEL = "gemini-3.5-flash-lite";
-    // Operator-reported free-tier limits for that model (AI Studio, 2026-10-28) - ceilings, not verified by Google.
-    public static final int FREE_TIER_MAX_RPM = 15;
-    public static final int FREE_TIER_MAX_TPM = 250_000;
-    public static final int FREE_TIER_MAX_RPD = 500;
-    /** The free-tier test never uses more than the default 80 % of a limit. */
+    /** INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED: the ONE switch that lets consented uploads reach Gemini. */
+    public static final String FREE_TIER_AUTO_QUEUE_PROPERTY = "invoice.gemini.free-tier-auto-queue-confirmed";
+    /** The only model this application uses. */
+    public static final String FREE_TIER_MODEL = "gemini-3.5-flash-lite";
+    /** The worker never uses more than the default 80 % of a configured limit. */
     public static final double FREE_TIER_MAX_SAFETY_MARGIN = 0.8;
+    /**
+     * Environment variables of removed features (paid mode, one-invoice test mode, invoice-id allowlist, data-use flag,
+     * legacy direct extraction, local-demo opt-in). Nothing reads them any more; a start that still
+     * has one logs a warning so the operator can delete it.
+     */
+    static final List<String> OBSOLETE_VARIABLES = Arrays.asList(
+            "INVOICE_GEMINI_PAID_TIER_CONFIRMED", "INVOICE_GEMINI_REQUIRE_PAID_TIER",
+            "INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED", "INVOICE_GEMINI_FREE_TIER_DATA_USE_ACKNOWLEDGED",
+            "INVOICE_WORKER_ONLY_INVOICE_IDS", "INVOICE_LEGACY_EXTRACT_ENABLED", "INVOICE_LOCALDEMO_GEMINI_ENABLED");
 
     private Environment environment;
 
@@ -95,6 +94,24 @@ public class SchemaSafetyGuard implements BeanFactoryPostProcessor, EnvironmentA
     @Override
     public void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) throws BeansException {
         check(environment);
+        List<String> obsolete = obsoleteSettings(environment);
+        if (!obsolete.isEmpty()) {
+            // Names only, never values. They have no effect; the operator should delete them from the environment.
+            LoggerFactory.getLogger(SchemaSafetyGuard.class).warn("Obsolete environment variable(s) {} are set but are "
+                    + "no longer read (paid mode, one-invoice test mode and invoice-id allowlists were removed). Delete "
+                    + "them from the service environment.", obsolete);
+        }
+    }
+
+    /** Which OBSOLETE_VARIABLES are present in the environment (names only). */
+    static List<String> obsoleteSettings(Environment env) {
+        List<String> present = new ArrayList<>();
+        for (String name : OBSOLETE_VARIABLES) {
+            if (env.getProperty(name) != null) {
+                present.add(name);
+            }
+        }
+        return present;
     }
 
     /** Static and side-effect free, so it can be unit-tested with any Environment. */
@@ -150,69 +167,28 @@ public class SchemaSafetyGuard implements BeanFactoryPostProcessor, EnvironmentA
                     + " is allowed");
         }
         requireNonMutatingSchemaSettings(env);
-        // The local demo has its own opt-in (INVOICE_LOCALDEMO_GEMINI_ENABLED); the hosted free-tier mode is not for it.
-        if (flag(env, FREE_TIER_TEST_PROPERTY, false)) {
-            throw refuse("the local demo must not set INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED; a local extraction test "
-                    + "uses INVOICE_LOCALDEMO_GEMINI_ENABLED");
-        }
         checkLocalDemoGemini(env);
     }
 
     /**
      * By default the local demo cannot call Gemini: no key (GEMINI_API_KEY would override the profile file) and no
-     * worker. INVOICE_LOCALDEMO_GEMINI_ENABLED=true is the explicit opt-in for a local extraction test; it still
-     * needs the key, may only send it to Google's official endpoint, and a running worker must be limited to named
-     * invoices (INVOICE_WORKER_ONLY_INVOICE_IDS) so the queued backlog is never processed by accident.
-     * The database rules above apply unchanged, so even with the opt-in only the local demo database is used.
+     * worker. INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED=true is the explicit opt-in for a local extraction test with
+     * a free-tier key; then the same rules as on the server apply (checkFreeTierQueue) and, as everywhere, only uploads
+     * with free-tier consent are sent. The database rules above apply unchanged: only the local demo database is used.
      */
     static void checkLocalDemoGemini(Environment env) {
-        boolean hasKey = !env.getProperty("gemini.api-key", "").trim().isEmpty();
-        // Read exactly as ExtractionWorker's @Value reads it: "yes", "on" and "1" also switch the worker on.
-        boolean worker = flag(env, "invoice.worker.enabled", false);
-        if (!"true".equalsIgnoreCase(env.getProperty(LOCAL_DEMO_GEMINI_PROPERTY, "false").trim())) {
-            if (hasKey) {
-                throw refuse("the local demo must not have a Gemini API key; remove GEMINI_API_KEY from the launch "
-                        + "configuration (or opt in deliberately with INVOICE_LOCALDEMO_GEMINI_ENABLED=true)");
-            }
-            if (worker) {
-                throw refuse("the local demo must not enable the extraction worker (INVOICE_WORKER_ENABLED) unless "
-                        + "INVOICE_LOCALDEMO_GEMINI_ENABLED=true");
-            }
+        if (flag(env, FREE_TIER_AUTO_QUEUE_PROPERTY, false)) {
+            checkFreeTierQueue(env);
             return;
         }
-        if (!hasKey) {
-            throw refuse("INVOICE_LOCALDEMO_GEMINI_ENABLED=true but GEMINI_API_KEY is not set");
+        if (!env.getProperty("gemini.api-key", "").trim().isEmpty()) {
+            throw refuse("the local demo must not have a Gemini API key; remove GEMINI_API_KEY from the launch "
+                    + "configuration (or opt in deliberately with INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED=true)");
         }
-        if (!OFFICIAL_GEMINI_BASE_URL.equals(env.getProperty("gemini.base-url", "").trim())) {
-            throw refuse("with INVOICE_LOCALDEMO_GEMINI_ENABLED=true the Gemini key may only be sent to "
-                    + OFFICIAL_GEMINI_BASE_URL + "; remove any gemini.base-url / GEMINI_BASE_URL override");
-        }
-        // The model is chosen on purpose, never the silent default: it must be the one checked in AI Studio.
-        String model = env.getProperty("GEMINI_MODEL", "").trim();
-        if (model.isEmpty()) {
-            throw refuse("with INVOICE_LOCALDEMO_GEMINI_ENABLED=true set GEMINI_MODEL explicitly (the model whose limits "
-                    + "you copied from Google AI Studio)");
-        }
-        if (!model.matches("[a-z0-9][a-z0-9.-]{1,79}") || !model.equals(env.getProperty("gemini.model", "").trim())) {
-            throw refuse("GEMINI_MODEL must be a plain model id such as gemini-3.5-flash-lite, and nothing else may "
-                    + "override gemini.model");
-        }
-        requireUsableLimits(env);
-        // The legacy single-file endpoint would call Gemini for any file an admin uploads, outside the allowlist.
-        if (!"false".equalsIgnoreCase(env.getProperty(LEGACY_EXTRACT_PROPERTY, "true").trim())) {
-            throw refuse("with INVOICE_LOCALDEMO_GEMINI_ENABLED=true the legacy single-file extraction must stay "
-                    + "disabled (" + LEGACY_EXTRACT_PROPERTY + "=false); only allowlisted queued invoices may be extracted");
-        }
-        if (worker) {
-            String ids = env.getProperty(WORKER_ONLY_INVOICE_IDS_PROPERTY, "").trim();
-            if (ids.isEmpty()) {
-                throw refuse("the local demo worker must be limited to named invoices: set "
-                        + "INVOICE_WORKER_ONLY_INVOICE_IDS (e.g. the id of one synthetic test invoice) so the existing "
-                        + "queue is not processed");
-            }
-            if (!ids.matches("\\d+(\\s*,\\s*\\d+)*")) {
-                throw refuse("INVOICE_WORKER_ONLY_INVOICE_IDS must be a comma-separated list of invoice ids");
-            }
+        // Read exactly as ExtractionWorker's @Value reads it: "yes", "on" and "1" also switch the worker on.
+        if (flag(env, "invoice.worker.enabled", false)) {
+            throw refuse("the local demo must not enable the extraction worker (INVOICE_WORKER_ENABLED) unless "
+                    + "INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED=true");
         }
     }
 
@@ -228,79 +204,49 @@ public class SchemaSafetyGuard implements BeanFactoryPostProcessor, EnvironmentA
                 env.getProperty("gemini.limits.tpm", ""), env.getProperty("gemini.limits.rpd", ""),
                 env.getProperty("gemini.limits.initial-token-estimate", ""), safetyMargin);
         if (!limits.isConfigured()) {
-            throw refuse("the Gemini limits are not usable: " + limits.getProblem() + " Use whole numbers from Google "
-                    + "AI Studio (e.g. 250000, not 250k)");
+            throw refuse("the Gemini limits are not usable: " + limits.getProblem() + " Use whole numbers read from "
+                    + "Google AI Studio for this project and model (e.g. 250000, not 250k)");
         }
         return limits;
     }
 
     /**
-     * Rule 4 (every non-demo start): the paid-tier requirement can never be switched off (e.g. by an environment
-     * variable INVOICE_GEMINI_REQUIRE_PAID_TIER=false), the paid and the free-tier confirmations exclude each other,
-     * and a free-tier test is only accepted in its fully restricted form (checkFreeTierTest).
+     * Rule 4 (every non-demo start): the free-tier queue is either off (nothing is sent) or fully restricted.
      * Booleans are read with the same conversion @Value uses ("yes"/"on"/"1" also mean true), so no spelling can
-     * switch a mode on behind the guard's back.
+     * switch it on behind the guard's back.
      */
     static void checkGeminiModes(Environment env) {
-        if (!flag(env, REQUIRE_PAID_TIER_PROPERTY, true)) {
-            throw refuse(REQUIRE_PAID_TIER_PROPERTY + " must stay true outside the local demo. For a paid project set "
-                    + "INVOICE_GEMINI_PAID_TIER_CONFIRMED=true; for a one-invoice free-tier test set "
-                    + "INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED=true");
-        }
-        boolean paid = flag(env, PAID_TIER_CONFIRMED_PROPERTY, false);
-        boolean freeTierTest = flag(env, FREE_TIER_TEST_PROPERTY, false);
-        if (paid && freeTierTest) {
-            throw refuse("INVOICE_GEMINI_PAID_TIER_CONFIRMED and INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED are both true; "
-                    + "set only the one that matches the API key's Google project");
-        }
-        if (freeTierTest) {
-            checkFreeTierTest(env);
+        if (flag(env, FREE_TIER_AUTO_QUEUE_PROPERTY, false)) {
+            checkFreeTierQueue(env);
         }
     }
 
     /**
-     * FREE_TIER_TEST (INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED=true): one selected test invoice through a free-tier key.
-     * Fail-closed: a key for the official endpoint only, the one model whose free-tier limits the owner reported, limits
-     * no higher than those reported ceilings with at least the default safety margin and even pacing, no legacy
-     * single-file extraction, and the worker limited to exactly ONE invoice id - whether or not the worker is enabled.
-     * The ceilings are the operator's reading of Google AI Studio, not a Google guarantee; lower values are fine.
+     * INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED=true: consented uploads through a free-tier key, FIFO (the per-record
+     * consent filter is ExtractionJobService). Fail-closed: a key for the official endpoint only, the one model this
+     * application uses, usable limits (whatever the operator read in AI Studio - no value is assumed here) with at most
+     * the default safety margin, and even pacing.
      */
-    static void checkFreeTierTest(Environment env) {
+    static void checkFreeTierQueue(Environment env) {
+        String variable = "INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED";
         if (env.getProperty("gemini.api-key", "").trim().isEmpty()) {
-            throw refuse("INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED=true but GEMINI_API_KEY is not set");
+            throw refuse(variable + "=true but GEMINI_API_KEY is not set");
         }
         if (!OFFICIAL_GEMINI_BASE_URL.equals(env.getProperty("gemini.base-url", "").trim())) {
-            throw refuse("in the free-tier test the Gemini key may only be sent to " + OFFICIAL_GEMINI_BASE_URL
+            throw refuse("the Gemini key may only be sent to " + OFFICIAL_GEMINI_BASE_URL
                     + "; remove any gemini.base-url / GEMINI_BASE_URL override");
         }
-        if (!FREE_TIER_TEST_MODEL.equals(env.getProperty("GEMINI_MODEL", "").trim())
-                || !FREE_TIER_TEST_MODEL.equals(env.getProperty("gemini.model", "").trim())) {
-            throw refuse("the free-tier test needs GEMINI_MODEL=" + FREE_TIER_TEST_MODEL + " set explicitly (the model "
-                    + "whose free-tier limits were reported), and nothing else may override gemini.model");
+        if (!FREE_TIER_MODEL.equals(env.getProperty("GEMINI_MODEL", "").trim())
+                || !FREE_TIER_MODEL.equals(env.getProperty("gemini.model", "").trim())) {
+            throw refuse(variable + "=true needs GEMINI_MODEL=" + FREE_TIER_MODEL + " set explicitly (the only model "
+                    + "this application uses), and nothing else may override gemini.model");
         }
         QuotaSettings limits = requireUsableLimits(env);
-        if (limits.getRpm() > FREE_TIER_MAX_RPM || limits.getTpm() > FREE_TIER_MAX_TPM
-                || limits.getRpd() > FREE_TIER_MAX_RPD) {
-            throw refuse("in the free-tier test GEMINI_LIMIT_RPM / GEMINI_LIMIT_TPM / GEMINI_LIMIT_RPD may not exceed "
-                    + FREE_TIER_MAX_RPM + " / " + FREE_TIER_MAX_TPM + " / " + FREE_TIER_MAX_RPD
-                    + " (the reported free-tier limits); use lower values");
-        }
         if (limits.getSafetyMargin() > FREE_TIER_MAX_SAFETY_MARGIN) {
-            throw refuse("in the free-tier test gemini.limits.safety-margin may not be above "
-                    + FREE_TIER_MAX_SAFETY_MARGIN);
+            throw refuse("gemini.limits.safety-margin may not be above " + FREE_TIER_MAX_SAFETY_MARGIN);
         }
         if (!flag(env, "gemini.limits.even-pacing", true)) {
-            throw refuse("in the free-tier test gemini.limits.even-pacing must stay true");
-        }
-        if (flag(env, LEGACY_EXTRACT_PROPERTY, true)) {
-            throw refuse("in the free-tier test the legacy single-file extraction must stay disabled ("
-                    + LEGACY_EXTRACT_PROPERTY + "=false, INVOICE_LEGACY_EXTRACT_ENABLED); it would bypass the "
-                    + "invoice allowlist");
-        }
-        String ids = env.getProperty(WORKER_ONLY_INVOICE_IDS_PROPERTY, "").trim();
-        if (!ids.matches("[1-9]\\d{0,17}")) {
-            throw refuse("the free-tier test must be limited to exactly ONE invoice: set INVOICE_WORKER_ONLY_INVOICE_IDS "
-                    + "to the id of the one selected test invoice (not empty, not a list)");
+            throw refuse("gemini.limits.even-pacing must stay true");
         }
     }
 

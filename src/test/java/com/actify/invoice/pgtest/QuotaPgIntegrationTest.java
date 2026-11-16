@@ -188,7 +188,7 @@ class QuotaPgIntegrationTest extends AbstractQueuePgTest {
     /** @return null when the call was allowed (and recorded), otherwise the refusal reason */
     private String reserve(GeminiQuotaGuard guard, Invoice invoice) {
         return transactionTemplate.execute(s -> {
-            GeminiQuotaGuard.Check check = guard.check(true);
+            GeminiQuotaGuard.Check check = guard.check(null);
             if (!check.isAllowed()) {
                 return check.getReason();
             }

@@ -50,10 +50,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * Checks the HTTP side of the failures we can't safely trigger live:
  * provider errors, bad LLM data and unexpected crashes. The service is mocked,
  * so no Gemini call and no database are involved.
- * The default profile is localdemo, which switches the legacy endpoint off; these tests are about the endpoint
- * itself, so they switch it on (the "off" case is LegacyExtractSwitchTest).
+ * The former direct extraction endpoint (POST /api/invoices/extract) is gone: every request to it is refused.
  */
-@WebMvcTest(value = InvoiceController.class, properties = "invoice.legacy-extract.enabled=true")
+@WebMvcTest(InvoiceController.class)
 @WithInvoiceWebSecurity
 @ExtendWith(OutputCaptureExtension.class)
 class InvoiceControllerTest {
@@ -88,22 +87,22 @@ class InvoiceControllerTest {
 
     @Test
     void validationFailureReturns422() throws Exception {
-        when(invoiceService.extractAndSave(any()))
+        when(invoiceService.getInvoice(7L))
                 .thenThrow(new InvoiceValidationException("subtotal + taxAmount (100) does not match totalAmount (120)"));
 
-        mockMvc.perform(multipart("/api/invoices/extract").file(pdf))
+        mockMvc.perform(get("/api/invoices/7"))
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.status").value(422))
                 .andExpect(jsonPath("$.error").value("Invoice validation failed"))
-                .andExpect(jsonPath("$.path").value("/api/invoices/extract"));
+                .andExpect(jsonPath("$.path").value("/api/invoices/7"));
     }
 
     @Test
     void providerFailureReturns502() throws Exception {
-        when(invoiceService.extractAndSave(any()))
+        when(invoiceService.getInvoice(7L))
                 .thenThrow(new InvoiceExtractionException("Gemini request failed with HTTP 503"));
 
-        mockMvc.perform(multipart("/api/invoices/extract").file(pdf))
+        mockMvc.perform(get("/api/invoices/7"))
                 .andExpect(status().isBadGateway())
                 .andExpect(jsonPath("$.error").value("Invoice extraction failed"))
                 .andExpect(jsonPath("$.message").value("Gemini request failed with HTTP 503"));
@@ -112,10 +111,10 @@ class InvoiceControllerTest {
     @Test
     void unexpectedErrorReturns500WithoutInternals() throws Exception {
         // Simulates something like a JDBC failure whose message contains internal details.
-        when(invoiceService.extractAndSave(any()))
+        when(invoiceService.getInvoice(7L))
                 .thenThrow(new IllegalStateException("connection to jdbc:postgresql://db-host failed, password=secret"));
 
-        mockMvc.perform(multipart("/api/invoices/extract").file(pdf))
+        mockMvc.perform(get("/api/invoices/7"))
                 .andExpect(status().isInternalServerError())
                 .andExpect(jsonPath("$.message").value("An unexpected error occurred."))
                 .andExpect(jsonPath("$.errorId").value(matchesPattern("[0-9a-f]{8}")))
@@ -126,11 +125,11 @@ class InvoiceControllerTest {
 
     @Test
     void aBrowserClosingTheConnectionIsNotReportedAsAServerError(CapturedOutput log) throws Exception {
-        when(invoiceService.extractAndSave(any())).thenAnswer(call -> {
+        when(invoiceService.getInvoice(7L)).thenAnswer(call -> {
             throw new ClientAbortException("An established connection was aborted by the software in your host machine");
         });
 
-        mockMvc.perform(multipart("/api/invoices/extract").file(pdf))
+        mockMvc.perform(get("/api/invoices/7"))
                 .andExpect(status().isOk())
                 .andExpect(content().string(""));
         assertThat(log.getOut()).doesNotContain("Unexpected error").doesNotContain("ClientAbortException");
@@ -162,11 +161,11 @@ class InvoiceControllerTest {
     }
 
     @Test
-    void postReturnsTokenUsageNextToTheExistingFields() throws Exception {
-        when(invoiceService.extractAndSave(any())).thenReturn(extractedTwoPageInvoice());
+    void getReturnsTokenUsageNextToTheExistingFields() throws Exception {
+        when(invoiceService.getInvoice(7L)).thenReturn(extractedTwoPageInvoice());
 
-        mockMvc.perform(multipart("/api/invoices/extract").file(pdf))
-                .andExpect(status().isCreated())
+        mockMvc.perform(get("/api/invoices/7"))
+                .andExpect(status().isOk())
                 // existing contract unchanged
                 .andExpect(jsonPath("$.id").value(42))
                 .andExpect(jsonPath("$.status").value("EXTRACTED"))
@@ -250,8 +249,8 @@ class InvoiceControllerTest {
     }
 
     @Test
-    void missingFilePartReturns400() throws Exception {
-        mockMvc.perform(multipart("/api/invoices/extract").param("note", "no file"))
-                .andExpect(status().isBadRequest());
+    void theRemovedDirectExtractionEndpointIsRefusedEvenForAnAdmin() throws Exception {
+        mockMvc.perform(multipart("/api/invoices/extract").file(pdf))
+                .andExpect(status().isForbidden());
     }
 }

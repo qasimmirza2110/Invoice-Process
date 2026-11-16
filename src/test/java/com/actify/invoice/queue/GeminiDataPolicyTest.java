@@ -10,7 +10,14 @@ import com.actify.invoice.quota.QuotaStatus;
 import com.actify.invoice.storage.InvoiceDocumentStorage;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.context.annotation.ClassPathScanningCandidateComponentProvider;
+import org.springframework.core.type.filter.AssignableTypeFilter;
 import org.springframework.web.client.RestTemplate;
+
+import java.util.Arrays;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -19,8 +26,9 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Real invoices go only to a paid Gemini project: until the owner confirms it, the worker never claims a job (the
- * invoice stays QUEUED, not FAILED), the admin sees why, and the extractor itself refuses to send anything.
+ * One provider, one mode: Gemini through a free-tier key. Until the operator confirms the free-tier queue the worker
+ * never claims a job (the invoice stays QUEUED, not FAILED), the admin sees why, and the extractor itself refuses to send
+ * anything. There is no paid mode, no second LLM implementation and no other route to Gemini.
  */
 class GeminiDataPolicyTest {
 
@@ -34,13 +42,13 @@ class GeminiDataPolicyTest {
                 extractor, quotaGuard, limits, config, true);
     }
 
-    private static GeminiConfig config(boolean required, boolean confirmed) {
-        return new GeminiConfig("test-key", "test-model", "http://127.0.0.1:9", required, confirmed);
+    private static GeminiConfig config(boolean confirmed) {
+        return new GeminiConfig("test-key", "gemini-3.5-flash-lite", "http://127.0.0.1:9", confirmed);
     }
 
     @Test
     void withoutTheConfirmationTheWorkerStaysIdleAndTouchesNoJob() {
-        ExtractionWorker w = worker(config(true, false));
+        ExtractionWorker w = worker(config(false));
         assertThat(w.isRunning()).isFalse();
         w.poll();
         verifyNoInteractions(jobs, extractor, quotaGuard);
@@ -49,78 +57,46 @@ class GeminiDataPolicyTest {
         when(quota.isConfigured()).thenReturn(true);
         WorkerStatusService status = new WorkerStatusService(w, jobs, quotaGuard);
         assertThat(status.isWorkerRunning(quota)).isFalse();
-        assertThat(status.idleReason(quota)).isEqualTo(GeminiConfig.PAID_TIER_BLOCKED_REASON)
-                .contains("INVOICE_GEMINI_PAID_TIER_CONFIRMED").contains("INVOICE_GEMINI_FREE_TIER_TEST_CONFIRMED");
+        assertThat(status.idleReason(quota)).isEqualTo(GeminiConfig.NOT_CONFIRMED_REASON)
+                .contains("INVOICE_GEMINI_FREE_TIER_AUTO_QUEUE_CONFIRMED").contains("billing")
+                .doesNotContain("test-key");
+        assertThat(status.workerState(quota, 0)).isEqualTo(WorkerStatusService.WorkerState.MODE_NOT_CONFIRMED);
         assertThat(status.geminiMode()).isEqualTo(GeminiConfig.Mode.NOT_CONFIRMED);
     }
 
     @Test
-    void theConfirmationOrANonRequiringProfileLetsTheWorkerRun() {
-        assertThat(worker(config(true, true)).isRunning()).isTrue();
-        assertThat(worker(config(false, false)).isRunning()).isTrue();
-    }
-
-    // ---- FREE_TIER_TEST is its own mode: it never pretends to be PAID, and both together send nothing ----
-
-    private static GeminiConfig confirmed(boolean paidConfirmed, boolean freeTierTestConfirmed) {
-        return new GeminiConfig("test-key", "test-model", "http://127.0.0.1:9", true, paidConfirmed, freeTierTestConfirmed);
-    }
-
-    @Test
-    void eachConfirmationGivesItsOwnModeAndTheDefaultSendsNothing() {
-        assertThat(confirmed(false, false).getMode()).isEqualTo(GeminiConfig.Mode.NOT_CONFIRMED);
-        assertThat(confirmed(false, false).isDocumentSendingAllowed()).isFalse();
-        assertThat(confirmed(true, false).getMode()).isEqualTo(GeminiConfig.Mode.PAID);
-        assertThat(confirmed(false, true).getMode()).isEqualTo(GeminiConfig.Mode.FREE_TIER_TEST);
-        assertThat(confirmed(false, true).isFreeTierTest()).isTrue();
-        assertThat(confirmed(false, true).isDocumentSendingAllowed()).isTrue();
-        assertThat(confirmed(true, false).isFreeTierTest()).isFalse();
-        assertThat(config(false, false).getMode()).isEqualTo(GeminiConfig.Mode.LOCAL_DEMO);
-        // The plain 5-argument form (used before this mode existed) is never a free-tier test.
-        assertThat(config(true, true).isFreeTierTest()).isFalse();
-    }
-
-    @Test
-    void paidAndFreeTierConfirmationsTogetherAreAConflictThatSendsNothing() {
-        GeminiConfig both = confirmed(true, true);
-        assertThat(both.getMode()).isEqualTo(GeminiConfig.Mode.CONFLICT);
-        assertThat(both.isDocumentSendingAllowed()).isFalse();
-        assertThat(both.isFreeTierTest()).isFalse();
-        assertThat(both.getBlockedReason()).isEqualTo(GeminiConfig.CONFLICT_BLOCKED_REASON);
-
-        ExtractionWorker w = worker(both);
-        assertThat(w.isRunning()).isFalse();
-        w.poll();
-        verifyNoInteractions(jobs, extractor, quotaGuard);
-
-        QuotaStatus quota = mock(QuotaStatus.class);
-        when(quota.isConfigured()).thenReturn(true);
-        WorkerStatusService status = new WorkerStatusService(w, jobs, quotaGuard);
-        assertThat(status.geminiMode()).isEqualTo(GeminiConfig.Mode.CONFLICT);
-        assertThat(status.idleReason(quota)).contains("both true").doesNotContain("test-key");
-
-        RestTemplate rest = mock(RestTemplate.class);
-        GeminiInvoiceExtractor gemini = new GeminiInvoiceExtractor(rest, both, new ObjectMapper());
-        assertThatThrownBy(() -> gemini.extract(new byte[]{1, 2, 3}))
-                .isInstanceOf(InvoiceExtractionException.class)
-                .hasMessage(GeminiConfig.CONFLICT_BLOCKED_REASON);
-        verifyNoInteractions(rest);
-    }
-
-    @Test
-    void theFreeTierConfirmationLetsTheWorkerRunAndIsReportedAsSuch() {
-        ExtractionWorker w = worker(confirmed(false, true));
+    void theConfirmationLetsTheWorkerRunAndIsReportedAsTheFreeTierQueue() {
+        ExtractionWorker w = worker(config(true));
         assertThat(w.isRunning()).isTrue();
-        assertThat(new WorkerStatusService(w, jobs, quotaGuard).geminiMode()).isEqualTo(GeminiConfig.Mode.FREE_TIER_TEST);
+        assertThat(new WorkerStatusService(w, jobs, quotaGuard).geminiMode()).isEqualTo(GeminiConfig.Mode.FREE_TIER_AUTO_QUEUE);
+    }
+
+    @Test
+    void paidModeDoesNotExistInTheRuntimeConfiguration() {
+        assertThat(Arrays.stream(GeminiConfig.Mode.values()).map(Enum::name).collect(Collectors.toList()))
+                .containsExactly("NOT_CONFIRMED", "FREE_TIER_AUTO_QUEUE");
+        assertThat(Arrays.stream(GeminiConfig.class.getDeclaredMethods()).map(m -> m.getName().toLowerCase()))
+                .noneMatch(name -> name.contains("paid"));
+        assertThat(Arrays.stream(GeminiConfig.class.getDeclaredFields()).map(f -> f.getName().toLowerCase()))
+                .noneMatch(name -> name.contains("paid") || name.contains("fallback") || name.contains("allowlist"));
+    }
+
+    @Test
+    void geminiIsTheOnlyLlmImplementationOnTheClasspath() {
+        ClassPathScanningCandidateComponentProvider scanner = new ClassPathScanningCandidateComponentProvider(false);
+        scanner.addIncludeFilter(new AssignableTypeFilter(LlmInvoiceExtractor.class));
+        Set<String> implementations = scanner.findCandidateComponents("com.actify.invoice").stream()
+                .map(BeanDefinition::getBeanClassName).collect(Collectors.toSet());
+        assertThat(implementations).containsExactly(GeminiInvoiceExtractor.class.getName());
     }
 
     @Test
     void theExtractorRefusesToSendAnythingWithoutTheConfirmation() {
         RestTemplate rest = mock(RestTemplate.class);
-        GeminiInvoiceExtractor gemini = new GeminiInvoiceExtractor(rest, config(true, false), new ObjectMapper());
+        GeminiInvoiceExtractor gemini = new GeminiInvoiceExtractor(rest, config(false), new ObjectMapper());
         assertThatThrownBy(() -> gemini.extract(new byte[]{1, 2, 3}))
                 .isInstanceOf(InvoiceExtractionException.class)
-                .hasMessage(GeminiConfig.PAID_TIER_BLOCKED_REASON);
+                .hasMessage(GeminiConfig.NOT_CONFIRMED_REASON);
         verifyNoInteractions(rest);
     }
 }

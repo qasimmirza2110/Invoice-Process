@@ -44,7 +44,7 @@ class GeminiInvoiceExtractorTest {
     void setUp() {
         RestTemplate restTemplate = new RestTemplate();
         server = MockRestServiceServer.bindTo(restTemplate).build();
-        GeminiConfig config = new GeminiConfig("test-key", "gemini-3.5-flash-lite", "https://gemini.test/v1beta");
+        GeminiConfig config = new GeminiConfig("test-key", "gemini-3.5-flash-lite", "https://gemini.test/v1beta", true);
         extractor = new GeminiInvoiceExtractor(restTemplate, config, new ObjectMapper());
     }
 
@@ -205,7 +205,7 @@ class GeminiInvoiceExtractorTest {
 
     @Test
     void missingApiKeyFailsWithoutCallingGemini() {
-        GeminiConfig noKey = new GeminiConfig("", "gemini-3.5-flash-lite", "https://gemini.test/v1beta");
+        GeminiConfig noKey = new GeminiConfig("", "gemini-3.5-flash-lite", "https://gemini.test/v1beta", true);
         GeminiInvoiceExtractor extractorWithoutKey =
                 new GeminiInvoiceExtractor(new RestTemplate(), noKey, new ObjectMapper());
 
